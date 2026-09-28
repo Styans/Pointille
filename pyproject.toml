@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pointille"
+version = "0.1.0"
+description = "Even drone placement over AI-generated 3D models for drone shows"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21"]
+
+[project.optional-dependencies]
+cli = ["trimesh>=4.0", "pillow>=9.0"]
+test = ["pytest>=7", "trimesh>=4.0", "pillow>=9.0"]
+
+[project.scripts]
+pointille = "pointille.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pointille*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]

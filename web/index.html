@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pointille — дроны по модели</title>
+  <meta name="description" content="Равномерно распределяет заданное количество дронов по поверхности 3D-модели и берёт их цвета из текстуры. Модель не изменяется.">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <aside class="panel">
+    <header class="brand">
+      <h1>Pointille</h1>
+      <p>Дроны по поверхности 3D-модели. Модель и текстуры не меняются.</p>
+    </header>
+
+    <label class="drop" id="drop">
+      <input type="file" id="file" multiple accept=".glb,.gltf,.bin,.obj,.mtl,.fbx,.png,.jpg,.jpeg,.webp">
+      <strong>Перетащите модель сюда</strong>
+      <span>или нажмите, чтобы выбрать — GLB, GLTF, OBJ (+MTL и текстуры), FBX</span>
+    </label>
+    <div class="model-info" id="model-info" hidden></div>
+
+    <section class="group">
+      <label class="field">
+        <span>Количество дронов</span>
+        <div class="count-row">
+          <input type="range" id="count-range" min="0" max="1000" value="500">
+          <input type="number" id="count" min="1" max="100000" value="500">
+        </div>
+      </label>
+
+      <div class="field">
+        <span>Область</span>
+        <div class="segmented" role="radiogroup">
+          <label><input type="radio" name="area" value="surface" checked><span>Вся поверхность</span></label>
+          <label><input type="radio" name="area" value="facade"><span>Фасад</span></label>
+        </div>
+      </div>
+      <div class="facade-opts" id="facade-opts" hidden>
+        <label class="field">
+          <span>Где зрители</span>
+          <select id="view">
+            <option value="front">Спереди (+Z модели)</option>
+            <option value="back">Сзади</option>
+            <option value="left">Слева</option>
+            <option value="right">Справа</option>
+            <option value="top">Сверху</option>
+            <option value="camera">С текущего ракурса камеры</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Макс. угол к зрителю: <output id="angle-out">80°</output></span>
+          <input type="range" id="angle" min="10" max="90" value="80">
+        </label>
+      </div>
+
+      <label class="field">
+        <span>Цвет дронов</span>
+        <select id="color">
+          <option value="area">Средний цвет участка (меньше шума)</option>
+          <option value="point">Точно под дроном</option>
+          <option value="none">Не считывать (белые)</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="group">
+      <h2>Безопасность</h2>
+      <label class="field">
+        <span>Масштаб фигуры</span>
+        <select id="scale-mode">
+          <option value="none">Не менять</option>
+          <option value="min_distance">Под мин. дистанцию между дронами</option>
+          <option value="height">Под высоту фигуры</option>
+        </select>
+      </label>
+      <label class="field" id="min-dist-field" hidden>
+        <span>Мин. дистанция, м</span>
+        <input type="number" id="min-dist" value="1.5" min="0.01" step="0.1">
+      </label>
+      <label class="field" id="height-field" hidden>
+        <span>Высота фигуры, м</span>
+        <input type="number" id="height" value="20" min="0.01" step="1">
+      </label>
+    </section>
+
+    <details class="group">
+      <summary>Дополнительно</summary>
+      <label class="field"><span>Seed (вариант расстановки)</span><input type="number" id="seed" value="0" min="0"></label>
+      <label class="field"><span>Итерации выравнивания</span><input type="number" id="relax" value="20" min="0" max="200"></label>
+      <label class="field"><span>Плотность кандидатов</span><input type="number" id="oversample" value="8" min="2" max="32" step="1"></label>
+      <label class="check"><input type="checkbox" id="auto" checked> Пересчитывать автоматически</label>
+    </details>
+
+    <button class="primary" id="run" disabled>Распределить дронов</button>
+    <p class="error" id="error" hidden></p>
+
+    <section class="stats" id="stats" hidden>
+      <div><span>Дронов</span><b id="s-count">—</b></div>
+      <div><span>Мин. дистанция</span><b id="s-min">—</b></div>
+      <div><span>Средняя</span><b id="s-mean">—</b></div>
+      <div><span>Масштаб</span><b id="s-scale">—</b></div>
+      <div class="wide"><span>Габариты (Ш × Г × В)</span><b id="s-size">—</b></div>
+      <div class="wide muted" id="s-time"></div>
+    </section>
+
+    <section class="downloads" id="downloads" hidden>
+      <button id="dl-glb">GLB</button>
+      <button id="dl-csv">CSV</button>
+      <button id="dl-ply">PLY</button>
+      <p class="hint" id="dl-hint"></p>
+    </section>
+  </aside>
+
+  <main class="viewport" id="viewport">
+    <canvas id="canvas"></canvas>
+    <div class="view-toggle segmented" role="radiogroup" aria-label="Что показывать">
+      <label><input type="radio" name="show" value="both" checked><span>Модель + дроны</span></label>
+      <label><input type="radio" name="show" value="model"><span>Модель</span></label>
+      <label><input type="radio" name="show" value="drones"><span>Только дроны</span></label>
+    </div>
+    <div class="empty" id="empty">Загрузите 3D-модель, чтобы начать</div>
+    <div class="busy" id="busy" hidden><div class="spinner"></div><span id="busy-text">Считаю…</span></div>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

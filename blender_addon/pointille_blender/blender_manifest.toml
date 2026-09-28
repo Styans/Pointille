@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "pointille"
+version = "0.1.0"
+name = "Pointille"
+tagline = "Even drone placement over 3D models for drone shows"
+maintainer = "Tyan Stanislav"
+type = "add-on"
+website = "https://github.com/styans/pointille"
+tags = ["Object", "Mesh", "Animation"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:MIT"]
+
+[permissions]
+files = "Export drone positions and colors to CSV"

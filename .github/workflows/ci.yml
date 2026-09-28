@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[test]"
+      - run: pytest -q
+
+  blender:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # the bpy 4.2 wheel is built for Python 3.11
+      - run: sudo apt-get update && sudo apt-get install -y libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libsm6 libgl1
+      - run: pip install -e ".[test]" "bpy==4.2.*"
+      - run: pytest -q tests/test_blender_addon.py
+      - run: python tools/build_blender_addon.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pointille-blender-addon
+          path: dist/pointille_blender-*.zip
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
