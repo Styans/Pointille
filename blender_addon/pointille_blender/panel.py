@@ -1,11 +1,11 @@
 import bpy
 
-from . import drones
+from . import drones, skybrush
 from .operators import active_drones
 
 
 class POINTILLE_PT_main(bpy.types.Panel):
-    bl_label = "Pointille — дроны"
+    bl_label = "Pointille — вершины"
     bl_idname = "POINTILLE_PT_main"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -42,7 +42,7 @@ class POINTILLE_PT_main(bpy.types.Panel):
 
         row = layout.row()
         row.scale_y = 1.6
-        row.operator("pointille.distribute", icon="PARTICLES")
+        row.operator("pointille.distribute", icon="VERTEXSEL")
 
 
 class POINTILLE_PT_result(bpy.types.Panel):
@@ -63,19 +63,32 @@ class POINTILLE_PT_result(bpy.types.Panel):
         layout = self.layout
         col = layout.column(align=True)
         col.label(text=f"Объект: {obj.name}", icon="OUTLINER_OB_POINTCLOUD")
-        col.label(text=f"Дронов: {obj.get('pointille_count', 0)}")
+        col.label(text=f"Вершин: {obj.get('pointille_count', 0)}")
         col.label(text=f"Мин. дистанция: {obj.get('pointille_min_distance', 0.0):.3f} м")
         col.label(text=f"Средняя дистанция: {obj.get('pointille_mean_distance', 0.0):.3f} м")
         size = obj.get("pointille_size", (0.0, 0.0, 0.0))
         col.label(text="Габариты: " + " × ".join(f"{v:.2f}" for v in size) + " м")
+
+        col = layout.column(align=True)
+        col.label(text="Объект на вершинах:")
+        col.prop(obj, "pointille_instance", text="")
+        if obj.pointille_instance is not None:
+            col.label(text=f"Цвет: Instancer › {drones.COLOR_ATTR}", icon="INFO")
+
         if s.scale_mode != "NONE":
             layout.operator("pointille.apply_scale", icon="FULLSCREEN_ENTER")
-        row = layout.row(align=True)
-        row.prop(s, "preview", toggle=True, icon="LIGHT_POINT")
-        sub = row.row(align=True)
-        sub.enabled = s.preview
-        sub.prop(s, "preview_size", text="")
         layout.operator("pointille.export_csv", icon="EXPORT")
+
+        if skybrush.available(context):
+            box = layout.box()
+            entries = skybrush.entries_with(context.scene, obj)
+            box.label(
+                text="Skybrush: " + (", ".join(e.name for e in entries) if entries else "нет в раскадровке"),
+                icon="LIGHT",
+            )
+            row = box.row()
+            row.enabled = bool(entries)
+            row.operator("pointille.skybrush_colors", icon="COLOR")
 
 
 class POINTILLE_PT_advanced(bpy.types.Panel):

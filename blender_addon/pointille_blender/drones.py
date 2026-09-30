@@ -1,4 +1,8 @@
-"""The objects Pointille creates: the drone vertex cloud and its glowing preview.
+"""The object Pointille creates: a mesh of bare vertices, one per point.
+
+Nothing is placed on the vertices unless the user picks an object for that
+(``Object.pointille_instance``); it is then instanced on every vertex with
+Geometry Nodes, and the vertices themselves stay a plain mesh.
 
 The source model is never edited. Only its object transform changes, and
 only when the user asks to scale the formation.
@@ -12,13 +16,16 @@ from ._vendor import core, export
 
 DRONES_KEY = "pointille_drones"
 SOURCES_KEY = "pointille_sources"
-PREVIEW_KEY = "pointille_preview"
 COLOR_ATTR = "drone_color"
-GLOW_MATERIAL = "Pointille Drone Glow"
+INSTANCES_KEY = "pointille_instances"
+INSTANCES_NAME = "Pointille Instances"
+# 0.1 showed glowing balls on the vertices as a separate child object
+LEGACY_PREVIEW_KEY = "pointille_preview"
+LEGACY_GLOW_MATERIAL = "Pointille Drone Glow"
 
 
 def is_ours(obj):
-    return obj is not None and (obj.get(DRONES_KEY) or obj.get(PREVIEW_KEY))
+    return obj is not None and bool(obj.get(DRONES_KEY) or obj.get(LEGACY_PREVIEW_KEY))
 
 
 def source_objects(drones):
@@ -27,12 +34,12 @@ def source_objects(drones):
 
 
 def find_drones(obj):
-    """Drone object for a source, a drone object or a preview object."""
+    """Vertex object for a source, a vertex object or an old preview object."""
     if obj is None:
         return None
     if obj.get(DRONES_KEY):
         return obj
-    if obj.get(PREVIEW_KEY):
+    if obj.get(LEGACY_PREVIEW_KEY):
         return obj.parent if obj.parent and obj.parent.get(DRONES_KEY) else None
     for o in bpy.data.objects:
         if o.get(DRONES_KEY) and obj.name in str(o.get(SOURCES_KEY, "")).split("\n"):
@@ -41,7 +48,7 @@ def find_drones(obj):
 
 
 def resolve_sources(context):
-    """Selected models; a selected drone object stands for its model."""
+    """Selected models; a selected vertex object stands for its model."""
     picked = list(context.selected_objects)
     if context.active_object is not None and context.active_object not in picked:
         picked.append(context.active_object)
@@ -95,9 +102,40 @@ def measure(drones):
     return dmin, dmean, size
 
 
+def group_members(obj):
+    """Vertex groups of the current layout: name and (vertex index, weight) pairs of each."""
+    groups = [(g.name, []) for g in obj.vertex_groups]
+    if groups:
+        for v in obj.data.vertices:
+            for g in v.groups:
+                if g.group < len(groups):
+                    groups[g.group][1].append((v.index, g.weight))
+    return groups
+
+
+def restore_groups(obj, groups, old_count, active_index):
+    """Give a new layout the vertex groups of the old one (they belong to the mesh).
+
+    Skybrush builds a formation from a vertex group and pins every drone to a
+    ``Skybrush[Vertex i]`` group, so a group that held the whole old layout takes
+    the whole new one and any other group keeps its vertex indices.
+    """
+    count = len(obj.data.vertices)
+    for name, pairs in groups:
+        group = obj.vertex_groups.get(name) or obj.vertex_groups.new(name=name)
+        if old_count and len(pairs) == old_count:
+            group.add(list(range(count)), 1.0, "REPLACE")
+            continue
+        for i, weight in pairs:
+            if i < count:
+                group.add([i], weight, "REPLACE")
+    if groups:
+        obj.vertex_groups.active_index = active_index
+
+
 def write_drones(context, sources, result):
     anchor = sources[0]
-    name = f"{anchor.name}_drones"
+    name = f"{anchor.name}_points"
     obj = find_drones(anchor)
 
     mesh = bpy.data.meshes.new(name)
@@ -115,10 +153,12 @@ def write_drones(context, sources, result):
         collections = anchor.users_collection or [context.scene.collection]
         collections[0].objects.link(obj)
     else:
+        groups, old_count, active = group_members(obj), len(obj.data.vertices), obj.vertex_groups.active_index
         old = obj.data
         obj.data = mesh
         if old.users == 0:
             bpy.data.meshes.remove(old)
+        restore_groups(obj, groups, old_count, active)
     obj[DRONES_KEY] = 1
     obj[SOURCES_KEY] = "\n".join(s.name for s in sources)
     # follow the model when it is moved; vertices are stored in world space
@@ -128,6 +168,8 @@ def write_drones(context, sources, result):
     except ValueError:  # degenerate model transform
         obj.parent = None
     obj.matrix_basis = Matrix.Identity(4)
+    remove_legacy_preview(obj)
+    apply_instance(obj)
     context.view_layer.update()
     measure(obj)
     return obj
@@ -153,87 +195,87 @@ def apply_scale(context, drones, factor):
     measure(drones)
 
 
-def glow_material():
-    mat = bpy.data.materials.get(GLOW_MATERIAL)
-    if mat is not None:
-        return mat
-    mat = bpy.data.materials.new(GLOW_MATERIAL)
-    mat.use_nodes = True
-    nodes, links = mat.node_tree.nodes, mat.node_tree.links
-    nodes.clear()
-    attr = nodes.new("ShaderNodeAttribute")
-    attr.attribute_type = "GEOMETRY"
-    attr.attribute_name = COLOR_ATTR
-    emit = nodes.new("ShaderNodeEmission")
-    emit.inputs["Strength"].default_value = 3.0
-    out = nodes.new("ShaderNodeOutputMaterial")
-    attr.location, emit.location, out.location = (-300, 0), (0, 0), (250, 0)
-    links.new(attr.outputs["Color"], emit.inputs["Color"])
-    links.new(emit.outputs["Emission"], out.inputs["Surface"])
-    return mat
-
-
-def _preview_tree(name, drones, radius):
-    tree = bpy.data.node_groups.get(name)
-    if tree is None:
-        tree = bpy.data.node_groups.new(name, "GeometryNodeTree")
-        if hasattr(tree, "interface"):  # Blender 4.0+
-            tree.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
-        else:
-            tree.outputs.new("NodeSocketGeometry", "Geometry")
-        nodes, links = tree.nodes, tree.links
-        out = nodes.new("NodeGroupOutput")
-        info = nodes.new("GeometryNodeObjectInfo")
-        info.name = "Drones"
-        info.transform_space = "RELATIVE"
-        ico = nodes.new("GeometryNodeMeshIcoSphere")
-        ico.name = "Ball"
-        ico.inputs["Subdivisions"].default_value = 2
-        inst = nodes.new("GeometryNodeInstanceOnPoints")
-        real = nodes.new("GeometryNodeRealizeInstances")
-        setm = nodes.new("GeometryNodeSetMaterial")
-        setm.inputs["Material"].default_value = glow_material()
-        for i, node in enumerate((info, ico, inst, real, setm, out)):
-            node.location = (i * 200 - 600, 0 if node is not ico else -200)
-        links.new(info.outputs["Geometry"], inst.inputs["Points"])
-        links.new(ico.outputs["Mesh"], inst.inputs["Instance"])
-        links.new(inst.outputs["Instances"], real.inputs["Geometry"])
-        links.new(real.outputs["Geometry"], setm.inputs["Geometry"])
-        links.new(setm.outputs["Geometry"], out.inputs[0])
-    tree.nodes["Drones"].inputs["Object"].default_value = drones
-    tree.nodes["Ball"].inputs["Radius"].default_value = radius
+def _instances_tree():
+    """Geometry Nodes: keep the vertices and add the chosen object on each of them."""
+    tree = bpy.data.node_groups.new(INSTANCES_NAME, "GeometryNodeTree")
+    tree[INSTANCES_KEY] = 1
+    if hasattr(tree, "interface"):  # Blender 4.0+
+        tree.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        tree.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    else:
+        tree.inputs.new("NodeSocketGeometry", "Geometry")
+        tree.outputs.new("NodeSocketGeometry", "Geometry")
+    if hasattr(tree, "is_modifier"):
+        tree.is_modifier = True
+    nodes, links = tree.nodes, tree.links
+    vertices = nodes.new("NodeGroupInput")
+    # the object itself (any type, its own materials), placed by its origin ...
+    shape = nodes.new("GeometryNodeObjectInfo")
+    shape.name = "Object"
+    shape.inputs["As Instance"].default_value = True
+    # ... turned and sized as it is in the scene: scaling the model does not resize it
+    pose = nodes.new("GeometryNodeObjectInfo")
+    pose.name = "Object Pose"
+    pose.transform_space = "RELATIVE"
+    place = nodes.new("GeometryNodeInstanceOnPoints")
+    join = nodes.new("GeometryNodeJoinGeometry")
+    out = nodes.new("NodeGroupOutput")
+    vertices.location, shape.location, pose.location = (-500, 0), (-500, -150), (-500, -400)
+    place.location, join.location, out.location = (-200, -100), (50, 0), (250, 0)
+    links.new(vertices.outputs[0], place.inputs["Points"])
+    links.new(shape.outputs["Geometry"], place.inputs["Instance"])
+    links.new(pose.outputs["Rotation"], place.inputs["Rotation"])
+    links.new(pose.outputs["Scale"], place.inputs["Scale"])
+    links.new(vertices.outputs[0], join.inputs[0])
+    links.new(place.outputs["Instances"], join.inputs[0])
+    links.new(join.outputs[0], out.inputs[0])
     return tree
 
 
-def preview_object(drones):
-    return next((c for c in drones.children if c.get(PREVIEW_KEY)), None)
+def instances_modifier(points):
+    return next(
+        (m for m in points.modifiers
+         if m.type == "NODES" and m.node_group is not None and m.node_group.get(INSTANCES_KEY)),
+        None,
+    )
 
 
-def refresh_preview(context, drones):
-    settings = context.scene.pointille
-    prev = preview_object(drones)
-    if not settings.preview:
-        if prev is not None:
-            tree = prev.modifiers[0].node_group if prev.modifiers else None
-            bpy.data.objects.remove(prev)
-            if tree is not None and tree.users == 0:
+def apply_instance(points):
+    """Put ``points.pointille_instance`` on every vertex; with none set, leave bare vertices."""
+    target = points.pointille_instance
+    mod = instances_modifier(points)
+    if target is None:
+        if mod is not None:
+            tree = mod.node_group
+            points.modifiers.remove(mod)
+            if tree.users == 0:
                 bpy.data.node_groups.remove(tree)
-        return None
-    if prev is None:
-        prev = bpy.data.objects.new(f"{drones.name}_preview", bpy.data.meshes.new(f"{drones.name}_preview"))
-        for coll in drones.users_collection or [context.scene.collection]:
-            coll.objects.link(prev)
-        prev[PREVIEW_KEY] = 1
-        prev.parent = drones
-        prev.matrix_parent_inverse = Matrix.Identity(4)
-        prev.hide_select = True
-    # ball size in the drones' local units (world spacing / world scale)
-    scale = max(drones.matrix_world.to_scale()) or 1.0
-    spacing = float(drones.get("pointille_min_distance", 0.0)) or 0.1
-    radius = settings.preview_size * spacing / scale
-    mod = prev.modifiers.get("Pointille Preview") or prev.modifiers.new("Pointille Preview", "NODES")
-    mod.node_group = _preview_tree(f"Pointille Preview {drones.name}", drones, radius)
-    return prev
+        return
+    if mod is None:
+        mod = points.modifiers.new(INSTANCES_NAME, "NODES")
+        mod.node_group = _instances_tree()
+    elif mod.node_group.users > 1:  # shared with a duplicate of this object
+        mod.node_group = mod.node_group.copy()
+    for name in ("Object", "Object Pose"):
+        node = mod.node_group.nodes.get(name)
+        if node is not None:
+            node.inputs["Object"].default_value = target
+
+
+def remove_legacy_preview(points):
+    """Drop the glowing balls that version 0.1 put on the vertices."""
+    for child in [c for c in points.children if c.get(LEGACY_PREVIEW_KEY)]:
+        trees = [m.node_group for m in child.modifiers if m.type == "NODES" and m.node_group is not None]
+        mesh = child.data
+        bpy.data.objects.remove(child)
+        for tree in trees:
+            if tree.users == 0:
+                bpy.data.node_groups.remove(tree)
+        if mesh is not None and mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+    glow = bpy.data.materials.get(LEGACY_GLOW_MATERIAL)
+    if glow is not None and glow.users == 0:
+        bpy.data.materials.remove(glow)
 
 
 def export_csv(drones, path):

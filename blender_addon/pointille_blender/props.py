@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
+from bpy.props import EnumProperty, FloatProperty, IntProperty, PointerProperty
 
 VIEW_ITEMS = [
     ("FRONT", "Спереди (−Y)", "Зрители смотрят вдоль +Y, как в виде Front"),
@@ -18,16 +18,21 @@ VIEW_DIRS = {
 }
 
 
-def _update_preview(self, context):
+def _can_instance(self, obj):
     from . import drones
 
-    obj = drones.find_drones(context.active_object)
-    if obj is not None:
-        drones.refresh_preview(context, obj)
+    return not drones.is_ours(obj)
+
+
+def _update_instance(self, context):
+    from . import drones
+
+    if self.get(drones.DRONES_KEY):
+        drones.apply_instance(self)
 
 
 class PointilleSettings(bpy.types.PropertyGroup):
-    count: IntProperty(name="Дронов", description="Сколько точек-дронов распределить", default=500, min=1, soft_max=10000)
+    count: IntProperty(name="Вершин", description="Сколько вершин распределить по поверхности", default=500, min=1, soft_max=10000)
     seed: IntProperty(name="Seed", description="Другое число — другая, но такая же ровная расстановка", default=0, min=0)
     area_mode: EnumProperty(
         name="Область",
@@ -45,9 +50,9 @@ class PointilleSettings(bpy.types.PropertyGroup):
     color_mode: EnumProperty(
         name="Цвет",
         items=[
-            ("AREA", "Средний по участку", "Средний цвет текстуры на участке вокруг дрона — меньше шума"),
-            ("POINT", "Точно под дроном", "Цвет текстуры ровно в точке дрона"),
-            ("NONE", "Не считывать", "Все дроны белые"),
+            ("AREA", "Средний по участку", "Средний цвет текстуры на участке вокруг вершины — меньше шума"),
+            ("POINT", "Точно в вершине", "Цвет текстуры ровно в точке вершины"),
+            ("NONE", "Не считывать", "Все вершины белые"),
         ],
         default="AREA",
     )
@@ -55,7 +60,7 @@ class PointilleSettings(bpy.types.PropertyGroup):
         name="Масштаб",
         items=[
             ("NONE", "Не менять", ""),
-            ("MIN_DISTANCE", "Под мин. дистанцию", "Масштабировать модель так, чтобы дроны были не ближе заданного"),
+            ("MIN_DISTANCE", "Под мин. дистанцию", "Масштабировать модель так, чтобы вершины были не ближе заданного"),
             ("HEIGHT", "Под высоту", "Масштабировать модель под заданную высоту фигуры"),
         ],
         default="NONE",
@@ -66,20 +71,24 @@ class PointilleSettings(bpy.types.PropertyGroup):
         name="Выравнивание", description="Итерации выравнивания (0 — выкл.)", default=20, min=0, max=200,
     )
     oversample: FloatProperty(name="Плотность кандидатов", default=8.0, min=2.0, max=32.0)
-    preview: BoolProperty(
-        name="Светящиеся шары", description="Показать дронов шарами их цвета", default=True, update=_update_preview,
-    )
-    preview_size: FloatProperty(
-        name="Размер шара", description="Радиус шара в долях мин. дистанции", default=0.2, min=0.01, max=0.5,
-        update=_update_preview,
-    )
 
 
 def register():
     bpy.utils.register_class(PointilleSettings)
     bpy.types.Scene.pointille = PointerProperty(type=PointilleSettings)
+    # per vertex object: what stands on its vertices
+    bpy.types.Object.pointille_instance = PointerProperty(
+        name="Объект на вершинах",
+        description="Любой объект (например, модель дрона) встаёт в каждую вершину в своём размере "
+        "и повороте, точкой начала координат. Цвет вершины — в его материале: узел Attribute, "
+        "тип Instancer, имя drone_color. Пусто — только вершины",
+        type=bpy.types.Object,
+        poll=_can_instance,
+        update=_update_instance,
+    )
 
 
 def unregister():
+    del bpy.types.Object.pointille_instance
     del bpy.types.Scene.pointille
     bpy.utils.unregister_class(PointilleSettings)

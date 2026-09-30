@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "pointille"
-version = "0.1.0"
+version = "0.3.0"
 name = "Pointille"
-tagline = "Even drone placement over 3D models for drone shows"
+tagline = "Even vertex placement over 3D models for drone shows"
 maintainer = "Tyan Stanislav"
 type = "add-on"
 website = "https://github.com/styans/pointille"
@@ -14,4 +14,4 @@ blender_version_min = "4.2.0"
 license = ["SPDX:MIT"]
 
 [permissions]
-files = "Export drone positions and colors to CSV"
+files = "Export vertex positions and colors to CSV"

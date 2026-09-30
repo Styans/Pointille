@@ -73,8 +73,10 @@ def test_distribute_creates_colored_vertices(addon, model):
 
     drones = drones_of(addon, model)
     assert drones is not None and drones.parent == model
+    assert drones.name == f"{model.name}_points"
     me = drones.data
     assert len(me.vertices) == 150 and len(me.edges) == 0 and len(me.polygons) == 0
+    assert not drones.modifiers and not drones.children  # bare vertices, nothing placed on them
     assert drones["pointille_count"] == 150
 
     pts = addon.drones.world_positions(drones)
@@ -95,17 +97,50 @@ def test_distribute_creates_colored_vertices(addon, model):
     assert checked > 40
 
 
-def test_preview_object(addon, model):
-    bpy.ops.pointille.distribute(count=80)
-    drones = drones_of(addon, model)
-    prev = addon.drones.preview_object(drones)
-    assert prev is not None and prev.modifiers[0].type == "NODES"
-    evaluated = prev.evaluated_get(bpy.context.evaluated_depsgraph_get())
-    assert len(evaluated.data.vertices) >= 80 * 12  # an icosphere per drone
-    # switching the toggle off removes the preview (property update callback)
-    bpy.context.view_layer.objects.active = drones
-    bpy.context.scene.pointille.preview = False
-    assert addon.drones.preview_object(drones) is None
+def test_object_on_vertices(addon, model):
+    marker = bpy.data.objects.new("marker", bpy.data.meshes.new("marker"))
+    marker.data.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+    bpy.context.scene.collection.objects.link(marker)
+    marker.location = (30.0, 0.0, 0.0)  # where it stands does not matter
+    marker.rotation_euler = (0.0, 0.0, 0.5)
+    marker.scale = (0.25, 0.25, 0.25)
+    bpy.ops.pointille.distribute(count=50)
+    points = drones_of(addon, model)
+    points.pointille_instance = marker
+
+    s = bpy.context.scene.pointille
+    s.scale_mode = "MIN_DISTANCE"
+    s.target_min_distance = 2.0
+    assert bpy.ops.pointille.apply_scale() == {"FINISHED"}  # the model grows after the object is placed
+    assert model.matrix_world.to_scale()[0] > 3
+    placed = [
+        inst.matrix_world.copy()
+        for inst in bpy.context.evaluated_depsgraph_get().object_instances
+        if inst.is_instance and inst.object.original == marker
+    ]
+    assert len(placed) == 50
+    got = np.array(sorted(tuple(m.translation) for m in placed))
+    want = np.array(sorted(map(tuple, addon.drones.world_positions(points))))
+    assert np.allclose(got, want, atol=1e-4)
+    for m in placed:  # the object kept its own size and turn
+        assert tuple(m.to_scale()) == pytest.approx((0.25, 0.25, 0.25), rel=1e-4)
+        assert tuple(m.to_euler()) == pytest.approx((0.0, 0.0, 0.5), abs=1e-4)
+
+    bpy.ops.pointille.distribute(count=40)  # a new layout keeps the object on it
+    assert addon.drones.instances_modifier(points) is not None
+    points.pointille_instance = None
+    assert not points.modifiers
+
+
+def test_rerun_removes_old_glowing_balls(addon, model):
+    bpy.ops.pointille.distribute(count=30)
+    points = drones_of(addon, model)
+    old = bpy.data.objects.new("old_preview", bpy.data.meshes.new("old_preview"))
+    bpy.context.scene.collection.objects.link(old)
+    old["pointille_preview"] = 1
+    old.parent = points
+    bpy.ops.pointille.distribute(count=30)
+    assert "old_preview" not in bpy.data.objects and not points.children
 
 
 def test_rerun_reuses_object(addon, model):
@@ -113,6 +148,29 @@ def test_rerun_reuses_object(addon, model):
     bpy.ops.pointille.distribute(count=90)
     ours = [o for o in bpy.data.objects if o.get("pointille_drones")]
     assert len(ours) == 1 and len(ours[0].data.vertices) == 90
+
+
+def group_contents(obj):
+    return {
+        g.name: [v.index for v in obj.data.vertices if any(x.group == g.index for x in v.groups)]
+        for g in obj.vertex_groups
+    }
+
+
+def test_rerun_keeps_vertex_groups(addon, model):
+    # Skybrush makes a formation of one group and pins each drone to a "Skybrush[Vertex i]" group
+    bpy.ops.pointille.distribute(count=30)
+    points = drones_of(addon, model)
+    points.vertex_groups.new(name="Formation").add(list(range(30)), 1.0, "REPLACE")
+    points.vertex_groups.new(name="Skybrush[Vertex 7]").add([7], 1.0, "REPLACE")
+    points.vertex_groups.new(name="Skybrush[Vertex 29]").add([29], 1.0, "REPLACE")
+
+    bpy.ops.pointille.distribute(count=30, seed=3)
+    assert group_contents(points) == {
+        "Formation": list(range(30)), "Skybrush[Vertex 7]": [7], "Skybrush[Vertex 29]": [29],
+    }
+    bpy.ops.pointille.distribute(count=20)  # fewer vertices: vertex 29 is gone
+    assert group_contents(points) == {"Formation": list(range(20)), "Skybrush[Vertex 7]": [7], "Skybrush[Vertex 29]": []}
 
 
 def test_scale_to_min_distance(addon, model):
@@ -143,3 +201,48 @@ def test_export_csv(addon, model, tmp_path):
     assert bpy.ops.pointille.export_csv(filepath=str(path)) == {"FINISHED"}
     rows = list(csv.DictReader(path.open()))
     assert len(rows) == 40 and rows[0]["hex"].startswith("#")
+
+
+@pytest.fixture()
+def skybrush():
+    """Skybrush Studio, when installed next to Blender (not on CI)."""
+    import addon_utils
+
+    if addon_utils.enable("ui_skybrush_studio", default_set=False) is None:
+        pytest.skip("Skybrush Studio is not installed")
+    yield
+    addon_utils.disable("ui_skybrush_studio", default_set=False)
+
+
+def test_skybrush_drones_take_vertex_colors(addon, model, skybrush):
+    from sbstudio.plugin.utils.sampling import sample_colors_of_objects
+
+    bpy.context.scene.pointille.color_mode = "POINT"
+    bpy.ops.pointille.distribute(count=40)
+    points = drones_of(addon, model)
+    points.vertex_groups.new(name="Formation").add(list(range(40)), 1.0, "REPLACE")
+    points.skybrush.formation_vertex_group = "Formation"
+    formation = bpy.data.collections.new("shape")
+    formation.objects.link(points)
+    fleet = bpy.data.collections.new("fleet")
+    bpy.context.scene.collection.children.link(fleet)
+    bpy.context.scene.skybrush.settings.drone_collection = fleet
+    where = addon.drones.world_positions(points)
+    for i in range(40):  # drone i stands on marker 39 - i
+        drone = bpy.data.objects.new(f"Drone {i + 1}", None)
+        drone.location = where[39 - i]
+        fleet.objects.link(drone)
+    storyboard = bpy.context.scene.skybrush.storyboard
+    entry = storyboard.add_new_entry(name="shape", frame_start=10, duration=20, formation=formation)
+    entry.update_mapping([39 - i for i in range(40)])
+
+    bpy.context.view_layer.objects.active = points
+    assert bpy.ops.pointille.skybrush_colors() == {"FINISHED"}
+    lights = sample_colors_of_objects(list(fleet.objects), [15, 40])  # in the formation and after it
+    inside, after = (
+        np.array([(c.r, c.g, c.b) for c in (lights[d.name].colors[k] for d in fleet.objects)], dtype=float)
+        for k in (0, 1)
+    )
+    want = np.round(addon.drones.drone_colors_linear(points)[39 - np.arange(40)] * 255)
+    assert np.abs(inside - want).max() <= 1  # each drone shows the vertex it stands on
+    assert len(np.unique(inside, axis=0)) > 2 and (after == 255).all()  # outside: its own white

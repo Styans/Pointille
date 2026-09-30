@@ -5,7 +5,7 @@ from bpy.props import IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Vector
 
-from . import adapter, drones
+from . import adapter, drones, skybrush
 from ._vendor import core
 from .props import VIEW_DIRS
 
@@ -28,13 +28,13 @@ def active_drones(context):
 
 
 class POINTILLE_OT_distribute(bpy.types.Operator):
-    """Равномерно распределить дронов по поверхности выбранной модели (модель не меняется)"""
+    """Равномерно распределить вершины по поверхности выбранной модели (модель не меняется)"""
 
     bl_idname = "pointille.distribute"
-    bl_label = "Распределить дронов"
+    bl_label = "Распределить вершины"
     bl_options = {"REGISTER", "UNDO"}
 
-    count: IntProperty(name="Дронов", default=500, min=1, soft_max=10000)
+    count: IntProperty(name="Вершин", default=500, min=1, soft_max=10000)
     seed: IntProperty(name="Seed", default=0, min=0)
 
     @classmethod
@@ -77,17 +77,18 @@ class POINTILLE_OT_distribute(bpy.types.Operator):
         obj = drones.write_drones(context, sources, result)
         if s.scale_mode != "NONE":
             drones.apply_scale(context, obj, result.scale)
-        drones.refresh_preview(context, obj)
+        if skybrush.available(context):
+            skybrush.color_drones(context, obj, create=False)  # new colours for effects made earlier
         self.report(
             {"INFO"},
-            f"{result.count} дронов, мин. дистанция {obj['pointille_min_distance']:.3f} м "
+            f"Вершин: {result.count}, мин. дистанция {obj['pointille_min_distance']:.3f} м "
             f"({time.perf_counter() - started:.1f} с)",
         )
         return {"FINISHED"}
 
 
 class POINTILLE_OT_apply_scale(bpy.types.Operator):
-    """Масштабировать модель вместе с дронами под заданную мин. дистанцию или высоту"""
+    """Масштабировать модель вместе с вершинами под заданную мин. дистанцию или высоту"""
 
     bl_idname = "pointille.apply_scale"
     bl_label = "Масштабировать"
@@ -108,29 +109,41 @@ class POINTILLE_OT_apply_scale(bpy.types.Operator):
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
         drones.apply_scale(context, obj, factor)
-        drones.refresh_preview(context, obj)
         self.report({"INFO"}, f"Масштаб ×{factor:.4g}")
         return {"FINISHED"}
 
 
-class POINTILLE_OT_refresh_preview(bpy.types.Operator):
-    """Обновить светящиеся шары"""
+class POINTILLE_OT_skybrush_colors(bpy.types.Operator):
+    """Дроны Skybrush в формациях из этих вершин горят цветом вершины, на которой стоят (световой эффект, уходит в экспорт шоу)"""
 
-    bl_idname = "pointille.refresh_preview"
-    bl_label = "Обновить превью"
+    bl_idname = "pointille.skybrush_colors"
+    bl_label = "Покрасить дронов Skybrush"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        return active_drones(context) is not None
+        return context.mode == "OBJECT" and skybrush.available(context) and active_drones(context) is not None
 
     def execute(self, context):
-        drones.refresh_preview(context, active_drones(context))
+        done = skybrush.color_drones(context, active_drones(context))
+        if not done:
+            self.report({"ERROR"}, "Эти вершины не входят ни в одну формацию раскадровки Skybrush")
+            return {"CANCELLED"}
+        notes = []
+        for name, markers, count, ready in done:
+            if markers > count:
+                notes.append(f"«{name}»: маркеров {markers}, дронов {count} — часть цветов сместится")
+            if not ready:
+                notes.append(f"«{name}»: пересчитайте переходы (Recalculate transitions)")
+        if notes:
+            self.report({"WARNING"}, "; ".join(notes))
+        else:
+            self.report({"INFO"}, "Покрашено: " + ", ".join(f"«{name}»" for name, *_ in done))
         return {"FINISHED"}
 
 
 class POINTILLE_OT_export_csv(bpy.types.Operator, ExportHelper):
-    """Сохранить позиции (м, Z вверх) и цвета дронов в CSV"""
+    """Сохранить позиции (м, Z вверх) и цвета вершин в CSV"""
 
     bl_idname = "pointille.export_csv"
     bl_label = "Экспорт CSV"
@@ -154,7 +167,7 @@ class POINTILLE_OT_export_csv(bpy.types.Operator, ExportHelper):
 classes = (
     POINTILLE_OT_distribute,
     POINTILLE_OT_apply_scale,
-    POINTILLE_OT_refresh_preview,
+    POINTILLE_OT_skybrush_colors,
     POINTILLE_OT_export_csv,
 )
 
