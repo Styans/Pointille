@@ -3,9 +3,9 @@ import math
 import numpy as np
 import pytest
 
-from helpers import QUADRANTS, grid_plane, quadrant_texture, textured_plane, uv_sphere
+from helpers import QUADRANTS, cube, grid_plane, quadrant_texture, textured_plane, uv_sphere
 from pointille.core import DistributeOptions, Material, MeshData, Texture, distribute
-from pointille.core.color import linear_to_srgb, sample_texture, srgb_to_linear
+from pointille.core.color import glow, linear_to_srgb, sample_texture, srgb_to_linear
 from pointille.core.relax import closest_on_triangles
 from pointille.core.sampling import poisson_radius
 from pointille.core.spatial import Grid, nearest
@@ -90,6 +90,60 @@ def test_facade_without_visible_surface(sphere):
         distribute(plane, DistributeOptions(count=10, facade=True, view_dir=(0, -1, 0)))
 
 
+
+def test_audience_spread_reaches_the_sides():
+    # straight on, the audience sees one face of a cube; spread over 60° it sees the sides too
+    box = cube()
+    narrow = distribute(box, DistributeOptions(count=300, facade=True, view_dir=(0, -1, 0)))
+    wide = distribute(box, DistributeOptions(count=300, facade=True, view_dir=(0, -1, 0), audience_spread=60))
+    assert np.all(narrow.normals[:, 1] < -0.99)
+    side = np.abs(wide.normals[:, 0]) > 0.99
+    assert side.sum() > 60
+    assert np.all(wide.normals[:, 1] < 0.5) and np.all(np.abs(wide.normals[:, 2]) < 0.5)  # no back, top, bottom
+    # the sides are seen by part of the audience only, so they get fewer drones per area
+    assert np.all(wide.visibility[side] < 1) and np.all(wide.visibility[~side] == 1)
+    assert side.sum() < (~side).sum()
+    assert wide.min_distance > 0.75 * ideal_spacing(wide)
+
+
+def test_hidden_density_keeps_the_back_sparse(sphere):
+    r = distribute(sphere, DistributeOptions(count=400, facade=True, view_dir=(0, -1, 0), hidden_density=0.25))
+    front, back = r.positions[:, 1] < -0.2, r.positions[:, 1] > 0.2
+    assert back.sum() > 40
+    assert front.sum() > 2.5 * back.sum()
+    assert np.all(r.visibility[front] == 1) and np.all(r.visibility[back] == 0)
+    # a quarter of the density: hidden drones stand about twice as far apart
+    d, _ = nearest(r.positions, r.positions, 0.1, exclude_self=True)
+    assert np.median(d[back]) > 1.6 * np.median(d[front])
+    assert r.min_distance > 0.7 * ideal_spacing(r)
+
+
+def test_hidden_density_one_is_the_whole_surface(sphere):
+    r = distribute(sphere, DistributeOptions(count=300, facade=True, hidden_density=1.0))
+    assert r.area == pytest.approx(4 * math.pi, rel=0.02)
+    assert (r.positions[:, 1] > 0.2).sum() > 100
+
+
+def test_camera_sees_in_perspective():
+    # a plane 1 m in front of the camera hides twice its width of a plane 2 m away
+    back = grid_plane(size=(6, 2), res=12, y=0.0)
+    front = grid_plane(size=(1, 2), res=2, y=-1.0)
+    mesh = MeshData.concatenate([back, front])
+    r = distribute(mesh, DistributeOptions(count=300, facade=True, view_point=(0.0, -2.0, 0.0)))
+    on_back = np.abs(r.positions[:, 1]) < 1e-9
+    assert on_back.sum() > 100
+    assert np.all(np.abs(r.positions[on_back, 0]) > 1.0 - 1e-6)
+    assert np.all(r.visibility == 1)
+    # a far-away audience sees the back plane right next to the front one
+    far = distribute(mesh, DistributeOptions(count=300, facade=True, view_dir=(0, -1, 0)))
+    far_back = np.abs(far.positions[:, 1]) < 1e-9
+    assert np.any(np.abs(far.positions[far_back, 0]) < 0.9)
+
+
+def test_visibility_without_facade(sphere):
+    r = distribute(sphere, DistributeOptions(count=50))
+    assert np.all(r.visibility == 1)
+
 def test_bad_count(sphere):
     with pytest.raises(ValueError):
         distribute(sphere, DistributeOptions(count=0))
@@ -134,6 +188,45 @@ def test_base_color_and_vertex_colors_multiply():
 def test_srgb_roundtrip():
     x = np.linspace(0, 1, 101)
     assert np.allclose(linear_to_srgb(srgb_to_linear(x)), x)
+
+
+# black, dark brown, brown, gold, white, near-black noise (sRGB 0..255)
+GLOW_CASES = [(0, 0, 0), (60, 35, 18), (120, 70, 35), (240, 200, 60), (255, 255, 255), (8, 3, 6)]
+
+
+def glow8(srgb8, floor):
+    return np.round(linear_to_srgb(glow(srgb_to_linear(np.asarray(srgb8, float) / 255), floor)) * 255)
+
+
+def test_drones_never_go_black():
+    """An LED cannot be black: dark colours glow dim but keep their hue and their order of brightness."""
+    black, dark_brown, brown, gold, white, noise = glow8(GLOW_CASES, 0.4)
+    assert black.max() == round(0.4 * 255) and np.ptp(black) == 0  # a dim white, not off
+    assert np.array_equal(noise, black)  # near-black has no hue left to keep, only noise
+    assert dark_brown[0] > dark_brown[1] > dark_brown[2]  # still brown, only brighter
+    assert black.max() < dark_brown.max() < brown.max() < gold.max() <= white.max()
+    assert tuple(white) == (255, 255, 255)
+
+
+def test_glow_off_dark_and_black_models():
+    lin = srgb_to_linear(np.array(GLOW_CASES, float) / 255)
+    assert np.array_equal(glow(lin, 0.0), lin)  # 0: the model's colours as they are
+    dark_red = glow8([(40, 10, 10), (90, 20, 20)], 0.4)
+    assert dark_red[1][0] == 255 and dark_red[0][0] < 255  # a dark model is stretched up to full brightness
+    noisy_black = glow8(np.random.default_rng(0).integers(2, 22, (50, 3)), 0.4)
+    assert np.ptp(noisy_black.max(axis=1)) <= 10  # glows evenly (within 4 %): its noise does not make drones flicker
+
+
+def test_distribute_lights_a_dark_model():
+    mesh = grid_plane(res=2)
+    brown = srgb_to_linear(np.array([0.25, 0.15, 0.08]))
+    mesh.materials = [Material(base_color=tuple(brown))]
+    mesh.material_ids = np.zeros(mesh.triangle_count, np.int64)
+    lit = distribute(mesh, DistributeOptions(count=20, color_mode="point", min_brightness=0.4))
+    srgb = linear_to_srgb(lit.colors_linear)
+    assert (srgb.max(axis=1) > 0.4).all() and (srgb[:, 0] > srgb[:, 1]).all() and (srgb[:, 1] > srgb[:, 2]).all()
+    plain = distribute(mesh, DistributeOptions(count=20, color_mode="point"))
+    assert np.allclose(plain.colors_linear, brown)  # the core keeps the colours unless asked
 
 
 def test_scale_to_min_distance(sphere):

@@ -57,26 +57,47 @@ export function poissonRadius(area, count) {
   return Math.sqrt(area / (2 * Math.sqrt(3) * Math.max(count, 1)));
 }
 
+// How much wider than at full density the spacing is: 1 / sqrt(density).
+export function spacingScale(density, maxScale = Infinity) {
+  return Math.min(1 / Math.sqrt(Math.max(density, 1e-12)), maxScale);
+}
+
 // Weighted Sample Elimination: indices of the count kept points.
-export function eliminate(points, count, area, alpha = 8) {
+// scale (per point, see spacingScale) makes the spacing local, for a density
+// that varies over the surface; area is then the area weighted by that density.
+export function eliminate(points, count, area, alpha = 8, scale = null) {
   const m = points.length / 3;
   if (count >= m) return Int32Array.from({ length: m }, (_, i) => i);
   const dMax = 2 * poissonRadius(area, count);
   const dMin = dMax * (1 - Math.pow(count / m, 1.5)) * 0.65; // weight limiting
-  const grid = new Grid(points, dMax);
-  const offsets = new Int32Array(m + 1);
-  const nbr = [];
-  const wts = [];
+  let widest = 1;
+  if (scale) for (const s of scale) widest = Math.max(widest, s);
+  const grid = new Grid(points, dMax * widest);
+  const recv = [], send = [], wts = [];
   const w = new Float64Array(m);
   for (let i = 0; i < m; i++) {
-    grid.forEachNear(points[3 * i], points[3 * i + 1], points[3 * i + 2], dMax, (j, d) => {
+    // i only feels the points inside its own spacing, so a dense area is not
+    // squeezed by a sparse one nearby
+    const own = scale ? scale[i] : 1;
+    grid.forEachNear(points[3 * i], points[3 * i + 1], points[3 * i + 2], dMax * own, (j, d) => {
       if (j === i) return;
-      const wij = Math.pow(1 - Math.max(d, dMin) / dMax, alpha);
-      nbr.push(j);
+      const wij = Math.pow(1 - Math.max(d / own, dMin) / dMax, alpha);
+      recv.push(i);
+      send.push(j);
       wts.push(wij);
       w[i] += wij;
     });
-    offsets[i + 1] = nbr.length;
+  }
+  // removing a point lowers the weight of every point it crowds
+  const offsets = new Int32Array(m + 1);
+  for (const j of send) offsets[j + 1]++;
+  for (let i = 0; i < m; i++) offsets[i + 1] += offsets[i];
+  const fill = offsets.slice(0, m);
+  const nbr = new Int32Array(recv.length), nbrW = new Float64Array(recv.length);
+  for (let k = 0; k < recv.length; k++) {
+    const at = fill[send[k]]++;
+    nbr[at] = recv[k];
+    nbrW[at] = wts[k];
   }
 
   // indexed max-heap; weights only ever decrease, so updates sift down
@@ -111,7 +132,7 @@ export function eliminate(points, count, area, alpha = 8) {
     for (let k = offsets[i]; k < offsets[i + 1]; k++) {
       const j = nbr[k];
       if (removed[j]) continue;
-      w[j] -= wts[k];
+      w[j] -= nbrW[k];
       siftDown(pos[j]);
     }
   }

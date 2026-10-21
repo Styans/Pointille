@@ -20,6 +20,30 @@ export function uvSphere(radius = 1, rings = 48, segments = 96) {
   return { triangles: Float64Array.from(tris) };
 }
 
+// Axis-aligned cube centred at the origin, outward winding.
+export function cube(size = 2, res = 6) {
+  const h = size / 2, g = (i) => -h + (size * i) / res;
+  const tris = [];
+  for (let axis = 0; axis < 3; axis++)
+    for (const sign of [-1, 1])
+      for (let i = 0; i < res; i++)
+        for (let j = 0; j < res; j++) {
+          const quad = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(([a, b]) => {
+            const p = [0, 0, 0];
+            p[axis] = sign * h;
+            p[(axis + 1) % 3] = g(a);
+            p[(axis + 2) % 3] = g(b);
+            return p;
+          });
+          for (const k of [[0, 1, 2], [0, 2, 3]]) {
+            let tri = k.map((c) => quad[c]);
+            if (cross(sub(tri[1], tri[0]), sub(tri[2], tri[0]))[axis] * sign < 0) tri = tri.reverse();
+            tris.push(...tri.flat());
+          }
+        }
+  return { triangles: Float64Array.from(tris) };
+}
+
 // Plane in XZ at height y, normal = facing * Y; u follows +X, v follows +Z.
 export function gridPlane({ size = [2, 2], res = 8, y = 0, center = [0, 0], facing = -1 } = {}) {
   const tris = [], uvs = [];

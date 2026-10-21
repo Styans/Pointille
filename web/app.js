@@ -21,6 +21,8 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   file: $("file"), drop: $("drop"), info: $("model-info"), count: $("count"), countRange: $("count-range"),
   facadeOpts: $("facade-opts"), view: $("view"), angle: $("angle"), angleOut: $("angle-out"), color: $("color"),
+  spread: $("spread"), spreadOut: $("spread-out"), hidden: $("hidden"), hiddenOut: $("hidden-out"),
+  glow: $("glow"), glowOut: $("glow-out"), glowField: $("glow-field"),
   scaleMode: $("scale-mode"), minDist: $("min-dist"), minDistField: $("min-dist-field"), height: $("height"),
   heightField: $("height-field"), seed: $("seed"), relax: $("relax"), oversample: $("oversample"), auto: $("auto"),
   run: $("run"), error: $("error"), stats: $("stats"), downloads: $("downloads"), dlHint: $("dl-hint"),
@@ -280,10 +282,11 @@ const rangeFromCount = (n) => Math.round((Math.log10(Math.max(n, 1)) / LOG_MAX) 
 
 function options() {
   const facade = document.querySelector('input[name="area"]:checked').value === "facade";
-  let viewDir = VIEWS[ui.view.value];
+  let viewDir = VIEWS[ui.view.value], viewPoint = null;
   if (ui.view.value === "camera") {
     const d = camera.position.clone().sub(controls.target).normalize();
     viewDir = [d.x, d.y, d.z];
+    viewPoint = camera.position.toArray(); // sight lines converge on the camera, as on screen
   }
   return {
     count: Math.max(1, Math.floor(+ui.count.value || 1)),
@@ -292,8 +295,12 @@ function options() {
     oversample: Math.max(2, +ui.oversample.value || 8),
     facade,
     viewDir,
+    viewPoint,
     facadeAngle: +ui.angle.value,
+    audienceSpread: +ui.spread.value,
+    hiddenDensity: +ui.hidden.value / 100,
     colorMode: ui.color.value,
+    minBrightness: +ui.glow.value / 100,
     scaleMode: ui.scaleMode.value,
     targetMinDistance: +ui.minDist.value || 1.5,
     targetHeight: +ui.height.value || 20,
@@ -305,6 +312,10 @@ function syncControls() {
   const facade = document.querySelector('input[name="area"]:checked').value === "facade";
   ui.facadeOpts.hidden = !facade;
   ui.angleOut.textContent = `${ui.angle.value}°`;
+  ui.spreadOut.textContent = `${ui.spread.value}°`;
+  ui.hiddenOut.textContent = `${ui.hidden.value}%`;
+  ui.glowOut.textContent = `${ui.glow.value}%`;
+  ui.glowField.hidden = ui.color.value === "none";
   ui.minDistField.hidden = ui.scaleMode.value !== "min_distance";
   ui.heightField.hidden = ui.scaleMode.value !== "height";
 }
@@ -389,7 +400,7 @@ ui.count.addEventListener("input", () => {
   ui.countRange.value = rangeFromCount(+ui.count.value);
   schedule();
 });
-for (const el of [ui.view, ui.angle, ui.color, ui.scaleMode, ui.minDist, ui.height, ui.seed, ui.relax, ui.oversample]) {
+for (const el of [ui.view, ui.spread, ui.angle, ui.hidden, ui.color, ui.glow, ui.scaleMode, ui.minDist, ui.height, ui.seed, ui.relax, ui.oversample]) {
   el.addEventListener("input", schedule);
 }
 document.querySelectorAll('input[name="area"]').forEach((r) => r.addEventListener("change", schedule));

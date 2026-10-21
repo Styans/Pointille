@@ -10,6 +10,46 @@ export function linearToSrgb(c) {
   return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
 }
 
+// sRGB brightness below which a colour has no hue left to keep, only noise: it glows an even white
+const GLOW_NEAR_BLACK = [0.06, 0.2];
+const GLOW_STRETCH = 0.3; // the brightest drone counts as at least this bright: a black model is not stretched to full
+
+// numpy's default percentile (linear interpolation between the closest ranks)
+function percentile(values, q) {
+  const sorted = Float64Array.from(values).sort();
+  const pos = ((sorted.length - 1) * q) / 100;
+  const lo = Math.floor(pos);
+  const hi = Math.min(lo + 1, sorted.length - 1);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// Colours a drone can show: an LED cannot be black, a drone that is off is not seen at night. Every colour
+// keeps its hue, its saturation and its place among the drones' brightnesses: the brightest drone glows at
+// full, the darkest at `floor` 0..1, near-black an even dim white. `floor` 0 keeps the colours as they are.
+export function glow(linear, floor) {
+  const n = linear.length / 3;
+  if (!(floor > 0) || n === 0) return linear;
+  floor = Math.min(floor, 1);
+  const s = new Float64Array(linear.length);
+  const v = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    for (let a = 0; a < 3; a++) s[3 * i + a] = linearToSrgb(linear[3 * i + a]);
+    v[i] = Math.max(s[3 * i], s[3 * i + 1], s[3 * i + 2]);
+  }
+  const top = Math.max(percentile(v, 98), GLOW_STRETCH);
+  const [nb0, nb1] = GLOW_NEAR_BLACK;
+  const out = new Float64Array(linear.length);
+  for (let i = 0; i < n; i++) {
+    const hue = Math.min(Math.max((v[i] - nb0) / (nb1 - nb0), 0), 1);
+    const level = floor + (1 - floor) * Math.min(Math.max(v[i] / top, 0), 1) * hue;
+    for (let a = 0; a < 3; a++) {
+      const full = s[3 * i + a] / Math.max(v[i], 1e-6); // the same hue and saturation at full brightness
+      out[3 * i + a] = srgbToLinear((hue * full + 1 - hue) * level);
+    }
+  }
+  return out;
+}
+
 const LUT = Float64Array.from({ length: 256 }, (_, i) => srgbToLinear(i / 255));
 
 export function toSrgb8(linear) {

@@ -1,5 +1,6 @@
 // Relaxation: drones push each other apart while staying on the surface,
 // snapped back with an exact closest-point projection.
+import { spacingScale } from "./sampling.js";
 import { Grid } from "./spatial.js";
 
 // Barycentrics of the closest point on triangle (a, b, c) to p.
@@ -134,26 +135,35 @@ export class SurfaceProjector {
 }
 
 // Repulsion relaxation; returns the state with the best minimum spacing seen.
-// accept(x, y, z, tri) can veto a move (facade mode keeps drones visible).
-export function relax(points, triIds, bary, projector, spacing, iterations, step = 0.2, accept = null) {
+// density(x, y, z, tri) in [0, 1] makes the spacing local: a drone keeps
+// spacing / sqrt(density) (at most maxScale times spacing) from its
+// neighbours, and moves to where the density is 0 are vetoed (facade mode
+// keeps drones visible that way). projector.maxMove is the step limit for
+// the widest spacing.
+export function relax(points, triIds, bary, projector, spacing, iterations, step = 0.2, density = null, maxScale = 1) {
   let p = Float64Array.from(points), t = Int32Array.from(triIds), b = Float64Array.from(bary);
   const n = p.length / 3;
   if (iterations <= 0 || n < 2) return { points: p, triIds: t, bary: b };
   let bestMin = -1, best = null;
   const disp = new Float64Array(n * 3);
-  const maxMove = projector.maxMove;
+  const sc = new Float64Array(n).fill(1);
+  if (density) for (let i = 0; i < n; i++) sc[i] = spacingScale(density(p[3 * i], p[3 * i + 1], p[3 * i + 2], t[i]), maxScale);
+  const moveUnit = projector.maxMove / Math.max(maxScale, 1);
   for (let it = 0; it <= iterations; it++) {
-    const grid = new Grid(p, spacing);
+    let widest = 0;
+    for (const s of sc) widest = Math.max(widest, s);
+    const grid = new Grid(p, spacing * widest);
     disp.fill(0);
     let curMin = Infinity;
     for (let i = 0; i < n; i++) {
       const x = p[3 * i], y = p[3 * i + 1], z = p[3 * i + 2];
-      grid.forEachNear(x, y, z, spacing, (j, d) => {
+      const own = spacing * sc[i]; // every drone keeps its own spacing
+      grid.forEachNear(x, y, z, own, (j, d) => {
         if (j === i) return;
         if (d < curMin) curMin = d;
         // soft 1/d repulsion: strong for close pairs, zero at the ideal spacing
-        const mag = spacing / Math.max(d, spacing * 1e-3) - 1;
-        const f = mag / Math.max(d, 1e-300);
+        const mag = own / Math.max(d, own * 1e-3) - 1;
+        const f = (mag * own) / Math.max(d, 1e-300);
         disp[3 * i] += (x - p[3 * j]) * f;
         disp[3 * i + 1] += (y - p[3 * j + 1]) * f;
         disp[3 * i + 2] += (z - p[3 * j + 2]) * f;
@@ -166,15 +176,19 @@ export function relax(points, triIds, bary, projector, spacing, iterations, step
     }
     if (it === iterations) break;
     for (let i = 0; i < n; i++) {
-      let dx = disp[3 * i] * step * spacing, dy = disp[3 * i + 1] * step * spacing, dz = disp[3 * i + 2] * step * spacing;
-      const len = Math.hypot(dx, dy, dz);
+      let dx = disp[3 * i] * step, dy = disp[3 * i + 1] * step, dz = disp[3 * i + 2] * step;
+      const len = Math.hypot(dx, dy, dz), maxMove = moveUnit * sc[i];
       if (len > maxMove) {
         const s = maxMove / len;
         dx *= s; dy *= s; dz *= s;
       }
       const hit = projector.project([p[3 * i] + dx, p[3 * i + 1] + dy, p[3 * i + 2] + dz]);
       if (!hit) continue;
-      if (accept && !accept(hit.pos[0], hit.pos[1], hit.pos[2], hit.tri)) continue;
+      if (density) {
+        const rho = density(hit.pos[0], hit.pos[1], hit.pos[2], hit.tri);
+        if (!(rho > 0)) continue;
+        sc[i] = spacingScale(rho, maxScale);
+      }
       for (let a = 0; a < 3; a++) {
         p[3 * i + a] = hit.pos[a];
         b[3 * i + a] = hit.bary[a];

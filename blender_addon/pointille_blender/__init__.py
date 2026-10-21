@@ -9,7 +9,7 @@ drones can take the colors (see ``skybrush.py``).
 bl_info = {
     "name": "Pointille",
     "author": "Tyan Stanislav",
-    "version": (0, 3, 0),
+    "version": (0, 9, 0),
     "blender": (3, 6, 0),
     "location": "3D Viewport > Sidebar (N) > Pointille",
     "description": "Равномерно распределяет вершины по поверхности 3D-модели и берёт цвета из текстуры; "
@@ -17,9 +17,9 @@ bl_info = {
     "category": "Object",
 }
 
-from . import operators, panel, props  # noqa: E402
+from . import operators, panel, props, skybrush  # noqa: E402
 
-_modules = (props, operators, panel)
+_modules = (props, operators, panel, skybrush)
 
 
 def register():

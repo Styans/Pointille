@@ -27,6 +27,28 @@ def uv_sphere(radius=1.0, rings=48, segments=96):
     return MeshData(tris)
 
 
+
+def cube(size=2.0, res=6):
+    """Axis-aligned cube centred at the origin, outward winding."""
+    h = size / 2
+    g = np.linspace(-h, h, res + 1)
+    tris = []
+    for axis in range(3):
+        for sign in (-1.0, 1.0):
+            for i in range(res):
+                for j in range(res):
+                    quad = []
+                    for a, b in ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)):
+                        p = np.zeros(3)
+                        p[axis], p[(axis + 1) % 3], p[(axis + 2) % 3] = sign * h, g[a], g[b]
+                        quad.append(p)
+                    for k in ((0, 1, 2), (0, 2, 3)):
+                        tri = np.array([quad[c] for c in k])
+                        if np.cross(tri[1] - tri[0], tri[2] - tri[0])[axis] * sign < 0:
+                            tri = tri[::-1]
+                        tris.append(tri)
+    return MeshData(np.array(tris))
+
 def grid_plane(size=(2.0, 2.0), res=8, y=0.0, center=(0.0, 0.0), facing=-1):
     """Plane in XZ at height ``y``; normal is ``facing`` * Y.
 

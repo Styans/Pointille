@@ -57,9 +57,17 @@
             <option value="camera">С текущего ракурса камеры</option>
           </select>
         </label>
+        <label class="field" title="Углы и бока, которые видит только часть зрителей, получают дронов реже фасада">
+          <span>Ширина зрителей: <output id="spread-out">60°</output></span>
+          <input type="range" id="spread" min="0" max="180" step="5" value="60">
+        </label>
         <label class="field">
           <span>Макс. угол к зрителю: <output id="angle-out">80°</output></span>
           <input type="range" id="angle" min="10" max="90" value="80">
+        </label>
+        <label class="field" title="Плотность там, где модель не видит никто из зрителей: фигура остаётся целой при повороте">
+          <span>Скрытые части: <output id="hidden-out">25%</output></span>
+          <input type="range" id="hidden" min="0" max="100" step="5" value="25">
         </label>
       </div>
 
@@ -70,6 +78,10 @@
           <option value="point">Точно под дроном</option>
           <option value="none">Не считывать (белые)</option>
         </select>
+      </label>
+      <label class="field" id="glow-field" title="Дрон не светит чёрным: выключенный дрон ночью не виден. Самая тёмная точка горит с этой яркостью, самая яркая — в полную силу; оттенок сохраняется. 0 — цвета как у модели">
+        <span>Мин. яркость: <output id="glow-out">40%</output></span>
+        <input type="range" id="glow" min="0" max="100" step="5" value="40">
       </label>
     </section>
 

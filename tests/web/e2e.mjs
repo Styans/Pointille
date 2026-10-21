@@ -68,17 +68,39 @@ try {
   assert.equal(appended.doc.nodes.at(-1).name, "Pointille_Drones");
   assert.deepEqual(appended.doc.images, original.doc.images);
 
-  // facade from the front (+Z in glTF) keeps drones on the z > 0 half
+  // facade from the front (+Z in glTF): dense on the z > 0 half, sparse behind (hidden parts 25%)
   await page.click('input[name="area"][value="facade"] + span');
   await page.waitForFunction(() => window.pointille.state.result?.options.facade === true, null, { timeout: 60000 });
   await page.waitForFunction(() => !window.pointille.state.running);
-  const minZ = await page.evaluate(() => {
-    const r = window.pointille.state.result;
-    let m = Infinity;
-    for (let i = 0; i < r.count; i++) m = Math.min(m, r.positions[3 * i + 2]);
-    return m;
-  });
-  assert.ok(minZ > 0, `facade min z ${minZ}`);
+  const sides = () =>
+    page.evaluate(() => {
+      const r = window.pointille.state.result;
+      let front = 0, back = 0, minZ = Infinity;
+      for (let i = 0; i < r.count; i++) {
+        const z = r.positions[3 * i + 2];
+        minZ = Math.min(minZ, z);
+        if (z > 0.2) front++;
+        if (z < -0.2) back++;
+      }
+      return { front, back, minZ };
+    });
+  const soft = await sides();
+  assert.ok(soft.back > 0 && soft.front > 2 * soft.back, `facade front/back ${soft.front}/${soft.back}`);
+
+  // without hidden parts and with one viewer it keeps to the z > 0 half
+  for (const id of ["hidden", "spread"]) {
+    await page.evaluate((id) => {
+      const el = document.getElementById(id);
+      el.value = 0;
+      el.dispatchEvent(new Event("input"));
+    }, id);
+  }
+  await page.waitForFunction(() => {
+    const s = window.pointille.state;
+    return !s.running && s.result?.options.hiddenDensity === 0 && s.result.options.audienceSpread === 0;
+  }, null, { timeout: 60000 });
+  const strict = await sides();
+  assert.ok(strict.minZ > 0, `facade min z ${strict.minZ}`);
 
   if (process.env.SCREENSHOT) await page.screenshot({ path: process.env.SCREENSHOT });
   assert.deepEqual(errors, []);

@@ -1,5 +1,8 @@
 """The object Pointille creates: a mesh of bare vertices, one per point.
 
+The vertices are in a vertex group named as the Skybrush formation group of the
+object, so the object can be put into a formation as it is.
+
 Nothing is placed on the vertices unless the user picks an object for that
 (``Object.pointille_instance``); it is then instanced on every vertex with
 Geometry Nodes, and the vertices themselves stay a plain mesh.
@@ -17,6 +20,9 @@ from ._vendor import core, export
 DRONES_KEY = "pointille_drones"
 SOURCES_KEY = "pointille_sources"
 COLOR_ATTR = "drone_color"
+TEXTURE_ATTR = "pointille_texture_color"  # the texture colours, to undo hand-painting
+VISIBILITY_ATTR = "pointille_visibility"  # share of the audience that sees the vertex (facade mode)
+FORMATION_GROUP = "Pointille"  # vertex group of all vertices, the markers of a Skybrush formation
 INSTANCES_KEY = "pointille_instances"
 INSTANCES_NAME = "Pointille Instances"
 # 0.1 showed glowing balls on the vertices as a separate child object
@@ -77,12 +83,41 @@ def world_positions(drones):
 
 def drone_colors_linear(drones):
     me = drones.data
+    if me.is_editmode:  # attribute data is only reachable through the edit mesh then
+        import bmesh
+
+        bm = bmesh.from_edit_mesh(me)
+        layer = bm.verts.layers.float_color.get(COLOR_ATTR)
+        if layer is None:
+            return np.ones((len(bm.verts), 3))
+        return np.array([v[layer][:3] for v in bm.verts], dtype=np.float64).reshape(-1, 3)
     attr = me.color_attributes.get(COLOR_ATTR)
     if attr is None:
         return np.ones((len(me.vertices), 3))
     buf = np.empty(len(me.vertices) * 4, np.float32)
     attr.data.foreach_get("color", buf)
     return buf.reshape(-1, 4)[:, :3].astype(np.float64)
+
+
+def paint_selected(obj, rgb=None):
+    """Edit mode: give the selected vertices a colour, or their texture colour back
+    with ``rgb=None``. Returns how many vertices changed."""
+    import bmesh
+
+    bm = bmesh.from_edit_mesh(obj.data)
+    layers = bm.verts.layers.float_color
+    target = layers.get(COLOR_ATTR)
+    source = layers.get(TEXTURE_ATTR)
+    if target is None or (rgb is None and source is None):
+        return 0
+    changed = 0
+    for v in bm.verts:
+        if v.select:
+            v[target] = (*rgb, 1.0) if rgb is not None else v[source]
+            changed += 1
+    bmesh.update_edit_mesh(obj.data)
+    obj.update_from_editmode()  # vertices and groups of the mesh match the edit mesh again
+    return changed
 
 
 def measure(drones):
@@ -133,6 +168,27 @@ def restore_groups(obj, groups, old_count, active_index):
         obj.vertex_groups.active_index = active_index
 
 
+def ensure_formation_group(obj):
+    """Make the vertices a Skybrush formation as they are, without Edit Mode.
+
+    Skybrush puts drones on the vertices of the group named in the object's
+    *Drone Show* panel (``skybrush.formation_vertex_group``). A group the user
+    named there stays as it is, a part of the vertices too. With no name (or no
+    group of that name) the group is made of all vertices and named there, as
+    if Assign and *Use selected* had been pressed in Edit Mode.
+    """
+    sb = getattr(obj, "skybrush", None)  # None without Skybrush Studio
+    name = (sb.formation_vertex_group if sb is not None else "") or FORMATION_GROUP
+    if obj.vertex_groups.get(name) is None:
+        active = obj.vertex_groups.active_index if len(obj.vertex_groups) else None
+        obj.vertex_groups.new(name=name).add(list(range(len(obj.data.vertices))), 1.0, "REPLACE")
+        if active is not None:  # the user's active group stays active
+            obj.vertex_groups.active_index = active
+    if sb is not None and sb.formation_vertex_group != name:
+        sb.formation_vertex_group = name
+    return name
+
+
 def write_drones(context, sources, result):
     anchor = sources[0]
     name = f"{anchor.name}_points"
@@ -142,10 +198,13 @@ def write_drones(context, sources, result):
     n = result.count
     mesh.vertices.add(n)
     mesh.vertices.foreach_set("co", result.positions.astype(np.float32).ravel())
-    attr = mesh.color_attributes.new(COLOR_ATTR, "FLOAT_COLOR", "POINT")
     rgba = np.ones((n, 4), np.float32)
     rgba[:, :3] = result.colors_linear
-    attr.data.foreach_set("color", rgba.ravel())
+    for attr_name in (COLOR_ATTR, TEXTURE_ATTR):
+        mesh.color_attributes.new(attr_name, "FLOAT_COLOR", "POINT").data.foreach_set("color", rgba.ravel())
+    if result.visibility is not None:
+        mesh.attributes.new(VISIBILITY_ATTR, "FLOAT", "POINT").data.foreach_set(
+            "value", result.visibility.astype(np.float32))
     mesh.update()
 
     if obj is None:
@@ -159,6 +218,7 @@ def write_drones(context, sources, result):
         if old.users == 0:
             bpy.data.meshes.remove(old)
         restore_groups(obj, groups, old_count, active)
+    ensure_formation_group(obj)
     obj[DRONES_KEY] = 1
     obj[SOURCES_KEY] = "\n".join(s.name for s in sources)
     # follow the model when it is moved; vertices are stored in world space

@@ -2,6 +2,7 @@ import bpy
 
 from . import drones, skybrush
 from .operators import active_drones
+from .props import LED_STYLE_ITEMS
 
 
 class POINTILLE_PT_main(bpy.types.Panel):
@@ -30,8 +31,12 @@ class POINTILLE_PT_main(bpy.types.Panel):
         if s.area_mode == "FACADE":
             col = layout.column(align=True)
             col.prop(s, "view")
+            col.prop(s, "audience_spread")
             col.prop(s, "facade_angle")
+            col.prop(s, "hidden_density", slider=True)
         layout.prop(s, "color_mode")
+        if s.color_mode != "NONE":
+            layout.prop(s, "min_brightness", slider=True)
 
         col = layout.column(heading="Безопасность")
         col.prop(s, "scale_mode")
@@ -79,16 +84,97 @@ class POINTILLE_PT_result(bpy.types.Panel):
             layout.operator("pointille.apply_scale", icon="FULLSCREEN_ENTER")
         layout.operator("pointille.export_csv", icon="EXPORT")
 
-        if skybrush.available(context):
+        if context.mode == "EDIT_MESH" and obj is context.active_object:
             box = layout.box()
-            entries = skybrush.entries_with(context.scene, obj)
-            box.label(
-                text="Skybrush: " + (", ".join(e.name for e in entries) if entries else "нет в раскадровке"),
-                icon="LIGHT",
-            )
-            row = box.row()
-            row.enabled = bool(entries)
-            row.operator("pointille.skybrush_colors", icon="COLOR")
+            box.label(text="Цвет выделенных вершин", icon="VERTEXSEL")
+            row = box.row(align=True)
+            row.prop(s, "paint_color", text="")
+            row.operator("pointille.paint_vertices", text="Покрасить")
+            box.operator("pointille.paint_vertices", text="Вернуть цвета текстуры", icon="LOOP_BACK").texture = True
+
+        if skybrush.available(context):
+            self.draw_skybrush(context, layout, s, obj)
+
+
+    def draw_skybrush(self, context, layout, s, obj):
+        sb = context.scene.skybrush
+        box = layout.box()
+        entries = skybrush.entries_with(context.scene, obj)
+        box.label(text="Skybrush: " + (", ".join(e.name for e in entries) if entries else "нет в раскадровке"),
+                  icon="LIGHT")
+        # the same field as "Use selected" in Object Data > Drone Show
+        group = obj.skybrush.formation_vertex_group
+        col = box.column(align=True)
+        col.label(text="Группа вершин формации:")
+        col.prop_search(obj.skybrush, "formation_vertex_group", obj, "vertex_groups", text="")
+        if not group:
+            col.label(text="Не задана: весь объект = 1 дрон", icon="ERROR")
+        elif obj.vertex_groups.get(group) is None:
+            col.label(text="Нет такой группы: 0 дронов", icon="ERROR")
+        if not entries:
+            return
+        row = box.row()
+        row.template_list("POINTILLE_UL_layers", "", sb.light_effects, "entries", sb.light_effects,
+                          "active_entry_index", rows=4)
+        col = row.column(align=True)
+        col.operator("pointille.layer_add", icon="ADD", text="")
+        col.operator("pointille.layer_remove", icon="REMOVE", text="")
+        col.separator()
+        col.operator("pointille.layer_move", icon="TRIA_UP", text="").direction = "UP"
+        col.operator("pointille.layer_move", icon="TRIA_DOWN", text="").direction = "DOWN"
+        box.prop_search(s, "skybrush_segment", sb.storyboard, "entries_or_transitions")
+
+        effect = skybrush.active_layer(context.scene)
+        if effect is None:
+            box.label(text="Слой = свой диапазон кадров и стиль. Нажмите +", icon="INFO")
+            return
+        col = box.column(align=True)
+        col.prop(s, "led_name")
+        col.prop_search(s, "led_source", sb.storyboard, "entries")
+        col.prop_search(effect, "storyboard_entry_or_transition_selection", sb.storyboard, "entries_or_transitions",
+                        text="К записи")
+
+        col = box.column(align=True)
+        col.label(text="Диапазон (кадры)")
+        for text, prop, which in (("Начало", "frame_start", "START"), ("Конец", "frame_end", "END")):
+            row = col.row(align=True)
+            row.prop(effect, prop, text=text)
+            row.operator("pointille.layer_range", text="", icon="TIME").which = which
+        col.operator("pointille.layer_split", icon="AREA_SWAP")
+        col.prop(effect, "fade_in_duration", text="Плавно зажечь")
+        col.prop(effect, "fade_out_duration", text="Плавно погасить")
+        col.prop(effect, "influence", text="Влияние", slider=True)
+
+        col = box.column(align=True)
+        col.prop(s, "led_style")
+        if s.led_style not in ("TEXTURE", "OFF"):
+            col.prop(s, "led_mix", slider=True)
+            if s.led_style in ("SOLID", "GRADIENT"):
+                col.prop(s, "led_color")
+            if s.led_style == "GRADIENT":
+                col.prop(s, "led_color2")
+            col.prop(s, "led_speed")
+            if s.led_style != "SOLID":
+                col.prop(s, "led_spread")
+        elif s.led_style == "OFF":
+            col.prop(s, "led_mix", text="Приглушить", slider=True)
+        col.prop(s, "led_brightness", slider=True)
+        col.prop(s, "led_saturation", slider=True)
+
+
+class POINTILLE_UL_layers(bpy.types.UIList):
+    """Слои Pointille среди световых эффектов Skybrush."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(item, "enabled", text="")
+        row.label(text=f"{item.frame_start}–{item.frame_end}")
+        style = skybrush.effect_params(item)["style"]
+        row.label(text=next((name for key, name, _ in LED_STYLE_ITEMS if key == style), style))
+
+    def filter_items(self, context, data, propname):
+        items = getattr(data, propname)
+        return [self.bitflag_filter_item if e.name.startswith(skybrush.EFFECT_PREFIX) else 0 for e in items], []
 
 
 class POINTILLE_PT_advanced(bpy.types.Panel):
@@ -110,7 +196,7 @@ class POINTILLE_PT_advanced(bpy.types.Panel):
         layout.prop(s, "oversample")
 
 
-classes = (POINTILLE_PT_main, POINTILLE_PT_result, POINTILLE_PT_advanced)
+classes = (POINTILLE_UL_layers, POINTILLE_PT_main, POINTILLE_PT_result, POINTILLE_PT_advanced)
 
 
 def register():
