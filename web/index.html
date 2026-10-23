@@ -86,6 +86,51 @@
     </section>
 
     <section class="group">
+      <label class="check" title="Часть дронов встаёт точно на линии модели гуще заливки, а заливка оставляет им место: контур и черты фигуры читаются чётче. В углах линий дрон стоит всегда">
+        <input type="checkbox" id="outline"> Обводка: дроны на линиях модели
+      </label>
+      <div class="outline-opts" id="outline-opts" hidden>
+        <div class="field">
+          <span>Линии</span>
+          <div class="checks">
+            <label class="check" title="Контур фигуры, каким его видят зрители (Фасад → Где зрители), и края, где одна часть закрывает другую"><input type="checkbox" id="ol-silhouette" checked> Силуэт</label>
+            <label class="check" title="Что нарисовал бы художник внутри контура: глаза, ноздри, рот, уши, складки — где поверхность резко изгибается. Ищется по картинке модели с точки зрения зрителей"><input type="checkbox" id="ol-relief" checked> Рельеф</label>
+            <label class="check" title="Острые изломы поверхности: грани, углы, стыки частей"><input type="checkbox" id="ol-creases" checked> Рёбра</label>
+            <label class="check" title="Края открытой поверхности: текст, логотипы, плоскости"><input type="checkbox" id="ol-borders" checked> Края</label>
+            <label class="check" title="Границы цветов текстуры: глаза, рот, полосы"><input type="checkbox" id="ol-colors" checked> Цвета</label>
+          </div>
+        </div>
+        <div class="field">
+          <span>Сколько дронов на линиях</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="ol-amount" value="density" checked><span>Плотность</span></label>
+            <label><input type="radio" name="ol-amount" value="share"><span>Доля</span></label>
+          </div>
+        </div>
+        <label class="field" id="ol-density-field" title="Во сколько раз дроны на линиях стоят ближе, чем в заливке; сколько их — по длине линий, но не больше половины">
+          <span>Гуще заливки: <output id="ol-density-out">×1.5</output></span>
+          <input type="range" id="ol-density" min="1" max="3" step="0.1" value="1.5">
+        </label>
+        <label class="field" id="ol-share-field" title="Сколько дронов из всех встаёт на линии; шаг на них — из длины линий" hidden>
+          <span>Доля дронов: <output id="ol-share-out">30%</output></span>
+          <input type="range" id="ol-share" min="5" max="60" step="5" value="30">
+        </label>
+        <label class="field" id="relief-field" title="На сколько градусов поверхность должна изогнуться на коротком отрезке, чтобы там прошла линия рельефа. Меньше — больше деталей, но и шума">
+          <span>Изгиб рельефа: <output id="relief-out">40°</output></span>
+          <input type="range" id="relief" min="10" max="120" step="5" value="40">
+        </label>
+        <label class="field" id="crease-field" title="Грани, которые сходятся под углом больше этого, дают линию ребра">
+          <span>Угол рёбер: <output id="crease-out">40°</output></span>
+          <input type="range" id="crease" min="5" max="170" step="5" value="40">
+        </label>
+        <label class="field" id="contrast-field" title="Насколько должны различаться соседние цвета текстуры, чтобы между ними прошла линия (100% — как чёрный и белый). Меньше — больше линий, но и шума">
+          <span>Контраст цветов: <output id="contrast-out">15%</output></span>
+          <input type="range" id="contrast" min="1" max="100" value="15">
+        </label>
+      </div>
+    </section>
+
+    <section class="group">
       <h2>Безопасность</h2>
       <label class="field">
         <span>Масштаб фигуры</span>
@@ -122,6 +167,7 @@
       <div><span>Средняя</span><b id="s-mean">—</b></div>
       <div><span>Масштаб</span><b id="s-scale">—</b></div>
       <div class="wide"><span>Габариты (Ш × Г × В)</span><b id="s-size">—</b></div>
+      <div class="wide" id="s-outline-row" hidden><span>Обводка</span><b id="s-outline">—</b></div>
       <div class="wide muted" id="s-time"></div>
     </section>
 

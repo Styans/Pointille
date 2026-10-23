@@ -1,5 +1,6 @@
 import bpy
-from bpy.props import EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, PointerProperty,
+                       StringProperty)
 
 VIEW_ITEMS = [
     ("FRONT", "Спереди (−Y)", "Зрители смотрят вдоль +Y, как в виде Front"),
@@ -30,6 +31,16 @@ def _update_instance(self, context):
     if self.get(drones.DRONES_KEY):
         drones.apply_instance(self)
 
+
+OUTLINE_LINE_ITEMS = [
+    ("SILHOUETTE", "Силуэт", "Контур фигуры, каким его видят зрители (настройка «Зрители»), и края, где одна "
+     "часть закрывает другую (рука перед телом)"),
+    ("RELIEF", "Рельеф", "Что нарисовал бы художник внутри контура: глаза, ноздри, рот, уши, складки — где "
+     "поверхность резко изгибается. Ищется по картинке модели с точки зрения зрителей"),
+    ("CREASES", "Рёбра", "Острые изломы поверхности: грани, углы, стыки частей"),
+    ("BORDERS", "Края", "Края открытой поверхности: текст, логотипы, плоскости"),
+    ("COLORS", "Цвета", "Границы цветов текстуры: глаза, рот, полосы, картинка на флаге"),
+]
 
 LED_STYLE_ITEMS = [
     ("TEXTURE", "Цвета текстуры", "Дрон горит цветом своей вершины"),
@@ -138,6 +149,49 @@ class PointilleSettings(bpy.types.PropertyGroup):
         description="Дрон не светит чёрным: выключенный дрон ночью не виден. Самая тёмная вершина горит с этой "
         "яркостью, самая яркая — в полную силу; оттенок и порядок яркостей сохраняются. 0 — цвета как у модели",
         default=40.0, min=0.0, max=100.0, subtype="PERCENTAGE",
+    )
+    outline: BoolProperty(
+        name="Обводка",
+        description="Часть вершин встаёт точно на линии модели гуще заливки, а заливка оставляет им место: "
+        "контур и черты фигуры читаются чётче. В углах линий вершина стоит всегда",
+        default=False,
+    )
+    outline_lines: EnumProperty(
+        name="Линии", description="Какие линии модели обводить", items=OUTLINE_LINE_ITEMS, options={"ENUM_FLAG"},
+        default={"SILHOUETTE", "RELIEF", "CREASES", "BORDERS", "COLORS"},
+    )
+    outline_amount: EnumProperty(
+        name="Сколько",
+        items=[
+            ("DENSITY", "Плотность", "Вершины на линиях стоят во столько раз гуще заливки; сколько их — "
+             "по длине линий, но не больше половины всех"),
+            ("SHARE", "Доля", "Столько процентов вершин встаёт на линии; шаг на них — из длины линий"),
+        ],
+        default="DENSITY",
+    )
+    outline_density: FloatProperty(
+        name="Гуще заливки", description="Во сколько раз вершины на линиях стоят ближе друг к другу, чем в заливке",
+        default=1.5, min=1.0, max=3.0,
+    )
+    outline_share: FloatProperty(
+        name="Доля вершин", description="Сколько вершин из всех встаёт на линии",
+        default=30.0, min=5.0, max=60.0, subtype="PERCENTAGE",
+    )
+    crease_angle: FloatProperty(
+        name="Угол рёбер", description="Грани, которые сходятся под углом больше этого, дают линию ребра",
+        default=40.0, min=5.0, max=170.0,
+    )
+    relief_angle: FloatProperty(
+        name="Изгиб рельефа",
+        description="На сколько градусов поверхность должна изогнуться на коротком отрезке (около трети шага "
+        "дронов), чтобы там прошла линия рельефа. Меньше — больше деталей, но и шума (мех, вмятины)",
+        default=40.0, min=10.0, max=120.0,
+    )
+    color_contrast: FloatProperty(
+        name="Контраст цветов",
+        description="Насколько должны различаться соседние цвета текстуры, чтобы между ними прошла линия "
+        "(100 % — как чёрный и белый). Меньше — больше линий, но и шума",
+        default=15.0, min=1.0, max=100.0, subtype="PERCENTAGE",
     )
     scale_mode: EnumProperty(
         name="Масштаб",

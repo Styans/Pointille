@@ -21,6 +21,24 @@ def to_srgb8(linear) -> np.ndarray:
     return np.round(linear_to_srgb(linear) * 255.0).astype(np.uint8)
 
 
+_OKLAB_LMS = np.array([
+    [0.4122214708, 0.5363325363, 0.0514459929],
+    [0.2119034982, 0.6806995451, 0.1073969566],
+    [0.0883024619, 0.2817188376, 0.6299787005],
+])
+_OKLAB_LAB = np.array([
+    [0.2104542553, 0.7936177850, -0.0040720468],
+    [1.9779984951, -2.4285922050, 0.4505937099],
+    [0.0259040371, 0.7827717662, -0.8086757660],
+])
+
+
+def linear_to_oklab(c) -> np.ndarray:
+    """OKLab (Ottosson 2020): distances in it follow how different colours look; black-white is 1."""
+    lms = np.cbrt(np.maximum(np.asarray(c, dtype=np.float64), 0.0) @ _OKLAB_LMS.T)
+    return lms @ _OKLAB_LAB.T
+
+
 def _texels_rgb(tex: Texture, y: np.ndarray, x: np.ndarray) -> np.ndarray:
     px = tex.pixels[y, x]
     if px.dtype == np.uint8:

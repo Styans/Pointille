@@ -10,6 +10,7 @@
 import { averageByOwner, glow, surfaceColors, toSrgb8 } from "./color.js";
 import { Audience } from "./facade.js";
 import { SurfaceProjector, relax } from "./relax.js";
+import { AMOUNTS, findLines, place, split } from "./outline.js";
 import { mulberry32 } from "./rng.js";
 import { eliminate, poissonRadius, spacingScale, surfaceCandidates, triangleAreasNormals } from "./sampling.js";
 import { nearest } from "./spatial.js";
@@ -29,6 +30,19 @@ export const DEFAULTS = {
   occlusion: true,
   colorMode: "area", // "area" | "point" | "none"
   minBrightness: 0, // LEDs cannot be black: the darkest drone glows at this sRGB brightness 0..1 (0: as the model)
+  // outline: some drones right on the lines that draw the model, closer together than the fill
+  outline: false,
+  outlineSilhouette: true, // the contour the middle viewer sees (viewDir / viewPoint)
+  outlineCreases: true, // edges sharper than creaseAngle
+  outlineBorders: true, // edges of open surfaces: text, logos, planes
+  outlineRelief: true, // what a line drawing shows inside the silhouette: eyes, mouth, folds
+  outlineColors: true, // borders between colours of the texture
+  outlineAmount: "density", // "density": lines outlineDensity times denser than the fill; "share": that share of the drones
+  outlineDensity: 1.5,
+  outlineShare: 0.3,
+  creaseAngle: 40, // degrees between two faces that make a sharp edge
+  reliefAngle: 40, // degrees the surface must bend within a short stretch to draw a relief line
+  colorContrast: 0.15, // OKLab difference that makes a colour border (black-white is 1)
   scaleMode: "none", // "none" | "min_distance" | "height"
   targetMinDistance: 1.5,
   targetHeight: 20,
@@ -39,6 +53,7 @@ export function distribute(mesh, options = {}) {
   const opt = { ...DEFAULTS, ...options };
   const n = Math.floor(opt.count);
   if (!(n >= 1)) throw new Error("count must be at least 1");
+  if (!AMOUNTS.includes(opt.outlineAmount)) throw new Error(`unknown outline amount ${opt.outlineAmount}`);
   const rand = mulberry32(opt.seed);
   const tris = mesh.triangles;
   const { areas, normals } = triangleAreasNormals(tris);
@@ -80,15 +95,42 @@ export function distribute(mesh, options = {}) {
   const stretch = low === top ? null : cand.rho.map((r) => spacingScale(r / top));
   const relative = density && ((x, y, z, t) => density(x, y, z, t) / top);
 
-  const sel = eliminate(cand.pos, n, area, 8, stretch);
-  const radius = poissonRadius(area, n);
+  // the outline first: its drones stand still while the fill makes room around them
+  let lines = null, nLine = 0, lineSpacing = 0, line = null;
+  let fill = cand, fillArea = area, fillStretch = stretch;
+  if (opt.outline && n > 3) lines = findLines(mesh, areas, normals, weights, opt, 2 * poissonRadius(area, n), rand, audience);
+  if (lines) {
+    let free;
+    ({ count: nLine, spacing: lineSpacing, free, fillArea } = split(lines, cand.pos, area, n, opt));
+    if (nLine) {
+      line = place(lines, nLine, lineSpacing, opt.relaxIterations, tris);
+      nLine = line.triIds.length;
+    }
+    const keep = [];
+    free.forEach((f, k) => f && keep.push(k));
+    if (keep.length < n - nLine) {
+      // the lines took fewer drones than planned and left no room for the rest
+      fillArea = area;
+    } else if (keep.length < free.length) {
+      fill = {
+        pos: Float64Array.from(keep.flatMap((k) => [cand.pos[3 * k], cand.pos[3 * k + 1], cand.pos[3 * k + 2]])),
+        tri: Int32Array.from(keep, (k) => cand.tri[k]),
+        bary: Float64Array.from(keep.flatMap((k) => [cand.bary[3 * k], cand.bary[3 * k + 1], cand.bary[3 * k + 2]])),
+      };
+      fillStretch = stretch && Float64Array.from(keep, (k) => stretch[k]);
+    }
+  }
+  const nFill = n - nLine;
+
+  const sel = eliminate(fill.pos, nFill, fillArea, 8, fillStretch);
+  const radius = poissonRadius(fillArea, nFill);
   const ideal = 2 * radius;
-  let points = new Float64Array(n * 3), triIds = new Int32Array(n), bary = new Float64Array(n * 3);
+  let points = new Float64Array(nFill * 3), triIds = new Int32Array(nFill), bary = new Float64Array(nFill * 3);
   sel.forEach((c, i) => {
-    triIds[i] = cand.tri[c];
+    triIds[i] = fill.tri[c];
     for (let a = 0; a < 3; a++) {
-      points[3 * i + a] = cand.pos[3 * c + a];
-      bary[3 * i + a] = cand.bary[3 * c + a];
+      points[3 * i + a] = fill.pos[3 * c + a];
+      bary[3 * i + a] = fill.bary[3 * c + a];
     }
   });
   if (opt.relaxIterations > 0 && n > 1) {
@@ -96,9 +138,21 @@ export function distribute(mesh, options = {}) {
     for (let i = 0; i < weights.length; i++) if (weights[i] > 0) allowed.push(i);
     const sub = new Float64Array(allowed.length * 9);
     allowed.forEach((t, k) => sub.set(tris.subarray(9 * t, 9 * t + 9), 9 * k));
-    const widest = stretch ? stretch.reduce((a, b) => Math.max(a, b), 1) : 1;
+    const widest = fillStretch ? fillStretch.reduce((a, b) => Math.max(a, b), 1) : 1;
     const projector = new SurfaceProjector(sub, Int32Array.from(allowed), 0.5 * ideal, 0.15 * ideal * widest);
-    ({ points, triIds, bary } = relax(points, triIds, bary, projector, ideal, opt.relaxIterations, 0.2, relative, widest));
+    ({ points, triIds, bary } = relax(points, triIds, bary, projector, ideal, opt.relaxIterations, 0.2, relative, widest,
+      nLine ? line.points : null));
+  }
+  if (nLine) {
+    const join = (a, b, T) => {
+      const out = new T(a.length + b.length);
+      out.set(a);
+      out.set(b, a.length);
+      return out;
+    };
+    points = join(line.points, points, Float64Array);
+    triIds = join(line.triIds, triIds, Int32Array);
+    bary = join(line.bary, bary, Float64Array);
   }
 
   let colors;
@@ -110,6 +164,12 @@ export function distribute(mesh, options = {}) {
     colors = surfaceColors(mesh, triIds, bary);
   } else {
     colors = new Float64Array(n * 3).fill(1);
+  }
+  if (nLine && opt.colorMode !== "none") {
+    // an outline drone shows the colour right under it, or the side of a colour border it marks
+    const under = surfaceColors(mesh, triIds.subarray(0, nLine), bary.subarray(0, 3 * nLine));
+    const marked = lines.colorsAt(points.subarray(0, 3 * nLine));
+    for (let k = 0; k < 3 * nLine; k++) colors[k] = Number.isNaN(marked[k]) ? under[k] : marked[k];
   }
   colors = glow(colors, opt.minBrightness);
 
@@ -142,6 +202,9 @@ export function distribute(mesh, options = {}) {
     visibility: Float64Array.from({ length: n }, (_, i) =>
       audience ? audience.visibility(points[3 * i], points[3 * i + 1], points[3 * i + 2], triIds[i]) : 1,
     ),
+    outline: Uint8Array.from({ length: n }, (_, i) => (i < nLine ? 1 : 0)), // the outline drones come first
+    outlineCount: nLine,
+    outlineSpacing: nLine ? lineSpacing : 0, // distance between neighbouring outline drones, unscaled
   };
 }
 
@@ -163,6 +226,8 @@ export function summary(result) {
     minDistance: result.minDistance * result.scale,
     meanDistance: result.meanDistance * result.scale,
     size: result.size.map((v) => v * result.scale),
+    outlineCount: result.outlineCount,
+    outlineSpacing: result.outlineSpacing * result.scale,
   };
 }
 

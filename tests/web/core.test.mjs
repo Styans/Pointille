@@ -255,3 +255,110 @@ test("closest point on triangle", () => {
   assert.deepEqual(closestOnTriangle([-1, -1, 0], T, 0, b), [1, 0, 0]);
   assert.deepEqual(closestOnTriangle([2, 2, 0], T, 0, b).map((x) => +x.toFixed(9)), [0, 0.5, 0.5]);
 });
+
+// --- outline -----------------------------------------------------------------
+
+const NO_LINES = { outline: true, outlineSilhouette: false, outlineCreases: false, outlineBorders: false, outlineRelief: false, outlineColors: false };
+const linesOf = (kind, opts) => ({ ...NO_LINES, [`outline${kind}`]: true, ...opts });
+const texturedPlane = () => ({ ...gridPlane({ size: [2, 2], res: 8 }), materials: [{ baseColor: [1, 1, 1, 1], texture: quadrantTexture() }] });
+
+function outlineParts(r) {
+  const line = [], fill = [];
+  for (let i = 0; i < r.count; i++) (r.outline[i] ? line : fill).push(r.positions.subarray(3 * i, 3 * i + 3));
+  return { line, fill, flat: (pts) => Float64Array.from(pts.flatMap((p) => Array.from(p))) };
+}
+
+const median = (a) => Float64Array.from(a).sort()[Math.floor(a.length / 2)];
+const minOf = (a) => a.reduce((m, v) => Math.min(m, v), Infinity);
+
+test("outline without lines changes nothing", () => {
+  const plain = distribute(sphere, { count: 300, seed: 3 });
+  const smooth = distribute(sphere, linesOf("Creases", { count: 300, seed: 3 })); // a sphere has no sharp edges
+  assert.equal(smooth.outlineCount, 0);
+  assert.deepEqual(smooth.positions, plain.positions);
+});
+
+test("outline follows the edges of a cube", () => {
+  const r = distribute(cube(), linesOf("Creases", { count: 400 }));
+  const { line, fill, flat } = outlineParts(r);
+  assert.equal(r.count, 400);
+  assert.ok(r.outlineCount > 80 && r.outlineCount <= 200, `${r.outlineCount}`);
+  for (const p of line) assert.ok(p.filter((v) => Math.abs(Math.abs(v) - 1) < 1e-2).length >= 2, `${p}`); // on an edge
+  for (const c of [-1, 1].flatMap((x) => [-1, 1].flatMap((y) => [-1, 1].map((z) => [x, y, z]))))
+    assert.ok(minOf(line.map((p) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]))) < 1e-2);
+  const lineNn = nearest(flat(line), flat(line), 0.1, true).dist, fillNn = nearest(flat(fill), flat(fill), 0.1, true).dist;
+  assert.ok(minOf(lineNn) > 0.85 * r.outlineSpacing);
+  const ratio = median(fillNn) / median(lineNn);
+  assert.ok(Math.abs(ratio - 1.5) < 0.25, `${ratio}`); // outlineDensity
+  assert.ok(minOf(nearest(flat(fill), flat(line), 0.1).dist) > 0.6 * median(fillNn)); // the fill makes room
+});
+
+test("outline share of the drones", () => {
+  const r = distribute(cube(), linesOf("Creases", { count: 400, outlineAmount: "share", outlineShare: 0.3 }));
+  assert.equal(r.outlineCount, 120);
+  assert.equal(summary(r).outlineCount, 120);
+});
+
+test("outline draws the border of a plane", () => {
+  const r = distribute(gridPlane(), linesOf("Borders", { count: 300 }));
+  const { line } = outlineParts(r);
+  assert.ok(r.outlineCount > 40);
+  for (const p of line) assert.ok(Math.min(Math.abs(Math.abs(p[0]) - 1), Math.abs(Math.abs(p[2]) - 1)) < 1e-2);
+  for (const [x, z] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) assert.ok(minOf(line.map((p) => Math.hypot(p[0] - x, p[2] - z))) < 1e-2);
+});
+
+test("outline: the silhouette the audience sees", () => {
+  const r = distribute(sphere, linesOf("Silhouette", { count: 400, facade: true }));
+  const { line, flat } = outlineParts(r);
+  assert.ok(r.outlineCount > 40);
+  // the audience looks along +Y: the outline it sees is the rim of the sphere, on the near side
+  for (const p of line) {
+    assert.ok(Math.abs(Math.hypot(p[0], p[2]) - 1) < 0.02);
+    assert.ok(p[1] < 0 && p[1] > -0.2);
+  }
+  assert.ok(minOf(nearest(flat(line), flat(line), 0.1, true).dist) > 0.7 * r.outlineSpacing);
+});
+
+test("outline: no silhouette behind another part", () => {
+  const wall = gridPlane({ size: [0.8, 4], res: 4, y: -2 }); // a strip between the sphere and the audience
+  const r = distribute(concat([sphere, wall]), linesOf("Silhouette", { count: 400 }));
+  const { line } = outlineParts(r);
+  assert.ok(r.outlineCount > 20);
+  // behind the strip the sphere's rim is hidden; the strip's own edges draw the outline there
+  for (const p of line) if (Math.abs(p[0]) < 0.35) assert.ok(Math.abs(p[1] + 2) < 1e-6);
+});
+
+test("outline: relief follows a step", () => {
+  // a plane with a step across it: a line drawing marks the step, not the flat parts
+  const plane = gridPlane({ size: [2, 2], res: 60 });
+  const tris = Float64Array.from(plane.triangles);
+  for (let k = 0; k < tris.length; k += 3) tris[k + 1] -= 0.1 * (1 + Math.tanh(tris[k] / 0.03));
+  const r = distribute({ triangles: tris }, linesOf("Relief", { count: 400, facade: true }));
+  const { line } = outlineParts(r);
+  assert.ok(r.outlineCount > 20, `${r.outlineCount}`);
+  for (const p of line) assert.ok(Math.abs(p[0]) < 0.12, `${p}`);
+  const z = line.map((p) => p[2]);
+  assert.ok(Math.max(...z) - Math.min(...z) > 1.5);
+  assert.equal(distribute(sphere, linesOf("Relief", { count: 300 })).outlineCount, 0); // a sphere bends evenly
+});
+
+test("outline marks colour borders", () => {
+  const r = distribute(texturedPlane(), linesOf("Colors", { count: 300 }));
+  const { line, flat } = outlineParts(r);
+  assert.ok(r.outlineCount > 20);
+  for (const p of line) assert.ok(Math.min(Math.abs(p[0]), Math.abs(p[2])) < 0.03); // the quadrants meet at x=0, z=0
+  assert.ok(minOf(nearest(flat(line), flat(line), 0.1, true).dist) > 0.75 * r.outlineSpacing);
+});
+
+test("outline: all lines in facade mode", () => {
+  const opts = { count: 400, outline: true, facade: true, audienceSpread: 60, hiddenDensity: 0.25 };
+  const a = distribute(cube(), opts), b = distribute(cube(), opts);
+  assert.equal(a.count, 400);
+  assert.ok(a.outlineCount > 40);
+  assert.deepEqual(a.positions, b.positions);
+  assert.ok(a.minDistance > 0.8 * a.outlineSpacing);
+});
+
+test("outline: unknown amount", () => {
+  assert.throws(() => distribute(sphere, { count: 10, outline: true, outlineAmount: "most" }));
+});

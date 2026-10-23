@@ -136,6 +136,8 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .segmented input:focus-visible + span { outline: 2px solid var(--accent); }
 
 .check { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.outline-opts { display: flex; flex-direction: column; gap: 12px; }
 
 button {
   font: inherit;

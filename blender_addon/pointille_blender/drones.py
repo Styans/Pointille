@@ -23,6 +23,8 @@ COLOR_ATTR = "drone_color"
 TEXTURE_ATTR = "pointille_texture_color"  # the texture colours, to undo hand-painting
 VISIBILITY_ATTR = "pointille_visibility"  # share of the audience that sees the vertex (facade mode)
 FORMATION_GROUP = "Pointille"  # vertex group of all vertices, the markers of a Skybrush formation
+OUTLINE_ATTR = "pointille_outline"  # True for the vertices on the outline
+OUTLINE_GROUP = "Pointille обводка"  # the outline vertices, for Skybrush effects of their own
 INSTANCES_KEY = "pointille_instances"
 INSTANCES_NAME = "Pointille Instances"
 # 0.1 showed glowing balls on the vertices as a separate child object
@@ -134,7 +136,24 @@ def measure(drones):
     drones["pointille_min_distance"] = dmin
     drones["pointille_mean_distance"] = dmean
     drones["pointille_size"] = [float(v) for v in size]
+    on = outline_mask(drones)
+    if on is not None:
+        line = pts[on]
+        gaps = core.spatial.nn_distances(line, dmean or 1.0) if len(line) > 1 else np.zeros(1)
+        drones["pointille_outline_count"] = len(line)
+        drones["pointille_outline_spacing"] = float(np.median(gaps))
     return dmin, dmean, size
+
+
+def outline_mask(drones):
+    """Which vertices stand on the outline; None outside Object Mode or without one."""
+    me = drones.data
+    attr = None if me.is_editmode else me.attributes.get(OUTLINE_ATTR)
+    if attr is None:
+        return None
+    on = np.zeros(len(me.vertices), bool)
+    attr.data.foreach_get("value", on)
+    return on
 
 
 def group_members(obj):
@@ -189,6 +208,25 @@ def ensure_formation_group(obj):
     return name
 
 
+def set_outline_group(obj, outline):
+    """The outline vertices in their group, made afresh: the old layout's indices mean nothing now.
+    No outline, no group."""
+    group = obj.vertex_groups.get(OUTLINE_GROUP)
+    on = np.flatnonzero(outline) if outline is not None else np.zeros(0, np.int64)
+    if not len(on):
+        if group is not None:
+            obj.vertex_groups.remove(group)
+        return
+    if group is None:
+        active = obj.vertex_groups.active_index if len(obj.vertex_groups) else None
+        group = obj.vertex_groups.new(name=OUTLINE_GROUP)
+        if active is not None:  # the user's active group stays active
+            obj.vertex_groups.active_index = active
+    else:
+        group.remove(list(range(len(obj.data.vertices))))
+    group.add(on.tolist(), 1.0, "REPLACE")
+
+
 def write_drones(context, sources, result):
     anchor = sources[0]
     name = f"{anchor.name}_points"
@@ -205,6 +243,8 @@ def write_drones(context, sources, result):
     if result.visibility is not None:
         mesh.attributes.new(VISIBILITY_ATTR, "FLOAT", "POINT").data.foreach_set(
             "value", result.visibility.astype(np.float32))
+    if result.outline is not None:
+        mesh.attributes.new(OUTLINE_ATTR, "BOOLEAN", "POINT").data.foreach_set("value", result.outline)
     mesh.update()
 
     if obj is None:
@@ -219,6 +259,7 @@ def write_drones(context, sources, result):
             bpy.data.meshes.remove(old)
         restore_groups(obj, groups, old_count, active)
     ensure_formation_group(obj)
+    set_outline_group(obj, result.outline)
     obj[DRONES_KEY] = 1
     obj[SOURCES_KEY] = "\n".join(s.name for s in sources)
     # follow the model when it is moved; vertices are stored in world space

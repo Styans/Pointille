@@ -11,6 +11,7 @@ from .props import VIEW_DIRS
 
 SCALE_MODES = {"NONE": "none", "MIN_DISTANCE": "min_distance", "HEIGHT": "height"}
 COLOR_MODES = {"AREA": "area", "POINT": "point", "NONE": "none"}
+OUTLINE_AMOUNTS = {"DENSITY": "density", "SHARE": "share"}
 
 
 def _audience(context, settings):
@@ -74,6 +75,18 @@ class POINTILLE_OT_distribute(bpy.types.Operator):
                 hidden_density=s.hidden_density / 100.0,
                 color_mode=COLOR_MODES[s.color_mode],
                 min_brightness=s.min_brightness / 100.0,
+                outline=s.outline,
+                outline_silhouette="SILHOUETTE" in s.outline_lines,
+                outline_creases="CREASES" in s.outline_lines,
+                outline_borders="BORDERS" in s.outline_lines,
+                outline_relief="RELIEF" in s.outline_lines,
+                outline_colors="COLORS" in s.outline_lines,
+                outline_amount=OUTLINE_AMOUNTS[s.outline_amount],
+                outline_density=s.outline_density,
+                outline_share=s.outline_share / 100.0,
+                crease_angle=s.crease_angle,
+                relief_angle=s.relief_angle,
+                color_contrast=s.color_contrast / 100.0,
                 scale_mode=SCALE_MODES[s.scale_mode],
                 target_min_distance=s.target_min_distance,
                 target_height=s.target_height,
@@ -87,9 +100,14 @@ class POINTILLE_OT_distribute(bpy.types.Operator):
         if s.scale_mode != "NONE":
             drones.apply_scale(context, obj, result.scale)
         skybrush.refresh(context.scene, obj)  # new colours for the Skybrush effects made earlier
+        lines = ""
+        if result.outline_count:
+            lines = f", на обводке {result.outline_count}"
+        elif s.outline:
+            lines = ", линий для обводки не нашлось"
         self.report(
             {"INFO"},
-            f"Вершин: {result.count}, мин. дистанция {obj['pointille_min_distance']:.3f} м "
+            f"Вершин: {result.count}{lines}, мин. дистанция {obj['pointille_min_distance']:.3f} м "
             f"({time.perf_counter() - started:.1f} с)",
         )
         return {"FINISHED"}

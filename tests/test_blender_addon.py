@@ -192,6 +192,27 @@ def test_rerun_keeps_vertex_groups(addon, model):
     }
 
 
+def test_outline_vertices_in_their_own_group(addon, model):
+    # the fixture's quadrants meet in colour borders; their drones get a group for Skybrush effects
+    s = bpy.context.scene.pointille
+    s.outline = True
+    s.outline_lines = {"COLORS"}
+    bpy.ops.pointille.distribute(count=200)
+    points = drones_of(addon, model)
+    on = addon.drones.outline_mask(points)
+    assert 10 < on.sum() <= 100
+    assert group_contents(points)[addon.drones.OUTLINE_GROUP] == np.flatnonzero(on).tolist()
+    assert points["pointille_outline_count"] == on.sum() and points["pointille_outline_spacing"] > 0
+    bpy.ops.pointille.distribute(count=150, seed=2)  # a new layout: the group follows it, not the old indices
+    on = addon.drones.outline_mask(points)
+    assert group_contents(points)[addon.drones.OUTLINE_GROUP] == np.flatnonzero(on).tolist()
+    assert points.vertex_groups.active.name == addon.drones.FORMATION_GROUP
+    s.outline = False
+    bpy.ops.pointille.distribute(count=150)
+    assert addon.drones.OUTLINE_GROUP not in points.vertex_groups
+    assert not addon.drones.outline_mask(points).any()
+
+
 def test_scale_to_min_distance(addon, model):
     before = model_fingerprint(model)
     s = bpy.context.scene.pointille

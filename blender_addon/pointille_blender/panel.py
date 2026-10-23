@@ -38,6 +38,24 @@ class POINTILLE_PT_main(bpy.types.Panel):
         if s.color_mode != "NONE":
             layout.prop(s, "min_brightness", slider=True)
 
+        layout.prop(s, "outline")
+        if s.outline:
+            col = layout.column(align=True)
+            col.prop(s, "outline_lines")
+            col.prop(s, "outline_amount", expand=True)
+            if s.outline_amount == "DENSITY":
+                col.prop(s, "outline_density")
+            else:
+                col.prop(s, "outline_share", slider=True)
+            if "RELIEF" in s.outline_lines:
+                col.prop(s, "relief_angle")
+            if "CREASES" in s.outline_lines:
+                col.prop(s, "crease_angle")
+            if "COLORS" in s.outline_lines:
+                col.prop(s, "color_contrast", slider=True)
+            if {"SILHOUETTE", "RELIEF"} & set(s.outline_lines) and s.area_mode != "FACADE":
+                col.prop(s, "view")
+
         col = layout.column(heading="Безопасность")
         col.prop(s, "scale_mode")
         if s.scale_mode == "MIN_DISTANCE":
@@ -71,6 +89,9 @@ class POINTILLE_PT_result(bpy.types.Panel):
         col.label(text=f"Вершин: {obj.get('pointille_count', 0)}")
         col.label(text=f"Мин. дистанция: {obj.get('pointille_min_distance', 0.0):.3f} м")
         col.label(text=f"Средняя дистанция: {obj.get('pointille_mean_distance', 0.0):.3f} м")
+        if obj.get("pointille_outline_count"):
+            col.label(text=f"На обводке: {obj['pointille_outline_count']}, шаг "
+                      f"{obj.get('pointille_outline_spacing', 0.0):.3f} м")
         size = obj.get("pointille_size", (0.0, 0.0, 0.0))
         col.label(text="Габариты: " + " × ".join(f"{v:.2f}" for v in size) + " м")
 

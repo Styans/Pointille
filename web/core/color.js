@@ -10,6 +10,22 @@ export function linearToSrgb(c) {
   return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
 }
 
+// OKLab (Ottosson 2020) of linear RGB (flat, 3 per colour): distances follow how different colours
+// look; black-white is 1
+export function linearToOklab(linear) {
+  const out = new Float64Array(linear.length);
+  for (let k = 0; k < linear.length; k += 3) {
+    const r = Math.max(linear[k], 0), g = Math.max(linear[k + 1], 0), b = Math.max(linear[k + 2], 0);
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    out[k] = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+    out[k + 1] = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+    out[k + 2] = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  }
+  return out;
+}
+
 // sRGB brightness below which a colour has no hue left to keep, only noise: it glows an even white
 const GLOW_NEAR_BLACK = [0.06, 0.2];
 const GLOW_STRETCH = 0.3; // the brightest drone counts as at least this bright: a black model is not stretched to full

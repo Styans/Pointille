@@ -135,6 +135,7 @@ def relax(
     step: float = 0.2,
     density=None,
     max_scale: float = 1.0,
+    fixed=None,
 ):
     """Repulsion relaxation. Returns (points, tri_ids, bary) with the best
     minimum spacing seen.
@@ -143,15 +144,19 @@ def relax(
     keeps ``spacing / sqrt(density)`` (at most ``max_scale`` times
     ``spacing``) from its neighbours, and moves to where the density is 0 are
     vetoed (facade mode keeps drones visible that way). The projector's
-    ``max_move`` is the step limit for the widest spacing."""
+    ``max_move`` is the step limit for the widest spacing. ``fixed`` points
+    (F, 3) push the drones away but never move themselves (an outline the
+    fill makes room for)."""
     p, t, b = points.copy(), tri_ids.copy(), bary.copy()
-    if iterations <= 0 or len(p) < 2:
+    fixed = np.zeros((0, 3)) if fixed is None else np.asarray(fixed, dtype=np.float64).reshape(-1, 3)
+    if iterations <= 0 or not len(p) or len(p) + len(fixed) < 2:
         return p, t, b
     s = np.ones(len(p)) if density is None else spacing_scale(density(p, t), max_scale)
     best_min, best = -1.0, (p, t, b)
     for it in range(iterations + 1):
         reach = spacing * float(s.max())
-        grid = Grid(p, reach)
+        every = np.concatenate([p, fixed]) if len(fixed) else p  # the drones come first: query i is point i
+        grid = Grid(every, reach)
         qi, pj, dist = grid.query_radius(p, reach, exclude_self=True)
         local = spacing * s[qi]  # every drone keeps its own spacing
         near = dist < local
@@ -163,7 +168,7 @@ def relax(
             break
         # soft 1/d repulsion: strong for close pairs, zero at the ideal spacing
         mag = local / np.maximum(dist, local * 1e-3) - 1.0
-        force = (p[qi] - p[pj]) * (mag * local / np.maximum(dist, 1e-300))[:, None]
+        force = (p[qi] - every[pj]) * (mag * local / np.maximum(dist, 1e-300))[:, None]
         disp = np.zeros_like(p)
         np.add.at(disp, qi, force)
         disp *= step

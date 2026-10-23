@@ -281,3 +281,114 @@ def test_concatenate_keeps_materials():
     assert set(m.material_ids[: a.triangle_count]) == {0}
     assert set(m.material_ids[a.triangle_count :]) == {1}
     assert m.materials[1].texture is None
+
+
+# --- outline ---------------------------------------------------------------
+
+NO_LINES = dict(outline=True, outline_silhouette=False, outline_creases=False, outline_borders=False,
+                outline_relief=False, outline_colors=False)
+
+
+def lines_of(kind, **kw):
+    """Options for an outline of one kind of line only."""
+    return DistributeOptions(**{**NO_LINES, f"outline_{kind}": True, **kw})
+
+
+def outline_parts(r):
+    return r.positions[r.outline], r.positions[~r.outline]
+
+
+def test_outline_without_lines_changes_nothing(sphere):
+    plain = distribute(sphere, DistributeOptions(count=300, seed=3))
+    smooth = distribute(sphere, lines_of("creases", count=300, seed=3))  # a sphere has no sharp edges
+    assert smooth.outline_count == 0
+    assert np.array_equal(plain.positions, smooth.positions)
+    assert np.array_equal(plain.colors_linear, smooth.colors_linear)
+
+
+def test_outline_follows_cube_edges():
+    r = distribute(cube(), lines_of("creases", count=400))
+    line, fill = outline_parts(r)
+    assert r.count == 400 and 80 < r.outline_count <= 200
+    assert ((np.abs(np.abs(line) - 1.0) < 1e-2).sum(axis=1) >= 2).all()  # on an edge: two coordinates at ±1
+    corners = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
+    assert np.linalg.norm(line[:, None] - corners[None], axis=2).min(axis=0).max() < 1e-2
+    line_nn, _ = nearest(line, line, 0.1, exclude_self=True)
+    fill_nn, _ = nearest(fill, fill, 0.1, exclude_self=True)
+    assert line_nn.min() > 0.85 * r.outline_spacing
+    assert np.median(fill_nn) / np.median(line_nn) == pytest.approx(1.5, rel=0.15)  # outline_density
+    gap, _ = nearest(fill, line, 0.1)
+    assert gap.min() > 0.6 * np.median(fill_nn)  # the fill makes room for the outline
+
+
+def test_outline_share_of_the_drones():
+    r = distribute(cube(), lines_of("creases", count=400, outline_amount="share", outline_share=0.3))
+    assert r.outline_count == 120
+    assert r.summary()["outline_count"] == 120
+
+
+def test_outline_draws_the_border_of_a_plane():
+    r = distribute(grid_plane(), lines_of("borders", count=300))
+    line, _ = outline_parts(r)
+    assert r.outline_count > 40
+    assert (np.abs(np.abs(line[:, [0, 2]]) - 1.0).min(axis=1) < 1e-2).all()
+    for corner in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+        assert np.linalg.norm(line[:, [0, 2]] - corner, axis=1).min() < 1e-2
+
+
+def test_outline_silhouette_for_the_audience(sphere):
+    r = distribute(sphere, lines_of("silhouette", count=400, facade=True))
+    line, _ = outline_parts(r)
+    assert r.outline_count > 40
+    # the audience looks along +Y: the outline it sees is the rim of the sphere, on the near side
+    assert np.allclose(np.hypot(line[:, 0], line[:, 2]), 1.0, atol=0.02)
+    assert ((line[:, 1] < 0) & (line[:, 1] > -0.2)).all()
+    nn, _ = nearest(line, line, 0.1, exclude_self=True)
+    assert nn.min() > 0.7 * r.outline_spacing
+
+
+def test_outline_silhouette_hidden_behind_the_model(sphere):
+    wall = grid_plane(size=(0.8, 4.0), res=4, y=-2.0)  # a strip between the sphere and the audience
+    r = distribute(MeshData.concatenate([sphere, wall]), lines_of("silhouette", count=400))
+    line, _ = outline_parts(r)
+    assert r.outline_count > 20
+    # behind the strip the sphere's rim is hidden; the strip's own edges draw the outline there
+    assert np.allclose(line[np.abs(line[:, 0]) < 0.35, 1], -2.0)
+
+
+def test_outline_relief_follows_a_step(sphere):
+    # a plane with a step across it: a line drawing marks the step, not the flat parts
+    plane = grid_plane(size=(2.0, 2.0), res=60)
+    tris = plane.triangles.copy()
+    tris[:, :, 1] -= 0.1 * (1.0 + np.tanh(tris[:, :, 0] / 0.03))
+    r = distribute(MeshData(tris), lines_of("relief", count=400, facade=True))
+    line, _ = outline_parts(r)
+    assert r.outline_count > 20
+    assert (np.abs(line[:, 0]) < 0.12).all()
+    assert np.ptp(line[:, 2]) > 1.5
+    assert distribute(sphere, lines_of("relief", count=300)).outline_count == 0  # a sphere bends evenly
+
+
+def test_outline_marks_colour_borders():
+    r = distribute(textured_plane(), lines_of("colors", count=300))
+    line, _ = outline_parts(r)
+    assert r.outline_count > 20
+    assert (np.minimum(np.abs(line[:, 0]), np.abs(line[:, 2])) < 0.03).all()  # the quadrants meet at x=0, z=0
+    nn, _ = nearest(line, line, 0.1, exclude_self=True)
+    assert nn.min() > 0.75 * r.outline_spacing
+
+
+def test_outline_all_lines_in_facade_mode():
+    opts = dict(count=400, outline=True, facade=True, audience_spread=60, hidden_density=0.25)
+    a = distribute(cube(), DistributeOptions(**opts))
+    b = distribute(cube(), DistributeOptions(**opts))
+    assert a.count == 400 and a.outline_count > 40
+    assert np.array_equal(a.positions, b.positions)
+    assert a.min_distance > 0.8 * a.outline_spacing
+    rebuilt = np.einsum("ij,ijk->ik", a.barycentrics, cube().triangles[a.triangle_ids])
+    assert np.allclose(rebuilt, a.positions, atol=1e-9)
+
+
+def test_outline_bad_amount(sphere):
+    with pytest.raises(ValueError):
+        distribute(sphere, DistributeOptions(count=10, outline=True, outline_amount="most"))

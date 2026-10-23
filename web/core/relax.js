@@ -139,11 +139,14 @@ export class SurfaceProjector {
 // spacing / sqrt(density) (at most maxScale times spacing) from its
 // neighbours, and moves to where the density is 0 are vetoed (facade mode
 // keeps drones visible that way). projector.maxMove is the step limit for
-// the widest spacing.
-export function relax(points, triIds, bary, projector, spacing, iterations, step = 0.2, density = null, maxScale = 1) {
+// the widest spacing. `fixed` points (flat xyz) push the drones away but never
+// move themselves (an outline the fill makes room for).
+export function relax(points, triIds, bary, projector, spacing, iterations, step = 0.2, density = null, maxScale = 1, fixed = null) {
   let p = Float64Array.from(points), t = Int32Array.from(triIds), b = Float64Array.from(bary);
-  const n = p.length / 3;
-  if (iterations <= 0 || n < 2) return { points: p, triIds: t, bary: b };
+  const n = p.length / 3, nf = fixed ? fixed.length / 3 : 0;
+  if (iterations <= 0 || !n || n + nf < 2) return { points: p, triIds: t, bary: b };
+  const every = nf ? new Float64Array(3 * (n + nf)) : null; // the drones first: grid point i is drone i
+  if (nf) every.set(fixed, 3 * n);
   let bestMin = -1, best = null;
   const disp = new Float64Array(n * 3);
   const sc = new Float64Array(n).fill(1);
@@ -152,7 +155,9 @@ export function relax(points, triIds, bary, projector, spacing, iterations, step
   for (let it = 0; it <= iterations; it++) {
     let widest = 0;
     for (const s of sc) widest = Math.max(widest, s);
-    const grid = new Grid(p, spacing * widest);
+    if (nf) every.set(p);
+    const all = nf ? every : p;
+    const grid = new Grid(all, spacing * widest);
     disp.fill(0);
     let curMin = Infinity;
     for (let i = 0; i < n; i++) {
@@ -164,9 +169,9 @@ export function relax(points, triIds, bary, projector, spacing, iterations, step
         // soft 1/d repulsion: strong for close pairs, zero at the ideal spacing
         const mag = own / Math.max(d, own * 1e-3) - 1;
         const f = (mag * own) / Math.max(d, 1e-300);
-        disp[3 * i] += (x - p[3 * j]) * f;
-        disp[3 * i + 1] += (y - p[3 * j + 1]) * f;
-        disp[3 * i + 2] += (z - p[3 * j + 2]) * f;
+        disp[3 * i] += (x - all[3 * j]) * f;
+        disp[3 * i + 1] += (y - all[3 * j + 1]) * f;
+        disp[3 * i + 2] += (z - all[3 * j + 2]) * f;
       });
     }
     if (curMin === Infinity) curMin = spacing;

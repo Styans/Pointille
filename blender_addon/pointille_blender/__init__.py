@@ -9,7 +9,7 @@ drones can take the colors (see ``skybrush.py``).
 bl_info = {
     "name": "Pointille",
     "author": "Tyan Stanislav",
-    "version": (0, 9, 0),
+    "version": (0, 11, 0),
     "blender": (3, 6, 0),
     "location": "3D Viewport > Sidebar (N) > Pointille",
     "description": "Равномерно распределяет вершины по поверхности 3D-модели и берёт цвета из текстуры; "

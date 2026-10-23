@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from . import color as _color
+from . import outline as _outline
 from .facade import Audience
 from .mesh import MeshData
 from .relax import SurfaceProjector, relax
@@ -17,6 +18,7 @@ from .spatial import nearest
 from .stats import scale_factor, scale_pivot, spacing
 
 COLOR_MODES = ("area", "point", "none")
+OUTLINE_AMOUNTS = _outline.AMOUNTS
 
 
 @dataclass
@@ -40,6 +42,20 @@ class DistributeOptions:
     color_mode: str = "area"
     # LEDs cannot be black: the darkest drone glows at this sRGB brightness 0..1 (0: the model's colours as they are)
     min_brightness: float = 0.0
+    # outline: some drones right on the lines that draw the model, closer together than the fill
+    outline: bool = False
+    outline_silhouette: bool = True  # the contour the middle viewer sees (``view_dir`` / ``view_point``)
+    outline_creases: bool = True  # edges sharper than ``crease_angle``
+    outline_borders: bool = True  # edges of open surfaces: text, logos, planes
+    outline_relief: bool = True  # what a line drawing shows inside the silhouette: eyes, mouth, folds
+    outline_colors: bool = True  # borders between colours of the texture
+    # "density": lines ``outline_density`` times denser than the fill; "share": that share of the drones
+    outline_amount: str = "density"
+    outline_density: float = 1.5
+    outline_share: float = 0.3
+    crease_angle: float = 40.0  # degrees between two faces that make a sharp edge
+    relief_angle: float = 40.0  # degrees the surface must bend within a short stretch to draw a relief line
+    color_contrast: float = 0.15  # OKLab difference that makes a colour border (black-white is 1)
     # safety scaling: "none" | "min_distance" | "height"
     scale_mode: str = "none"
     target_min_distance: float = 1.5
@@ -61,6 +77,12 @@ class DroneResult:
     pivot: np.ndarray = field(default_factory=lambda: np.zeros(3))
     options: Optional[DistributeOptions] = None
     visibility: Optional[np.ndarray] = None  # (N,) share of the audience that sees each drone
+    outline: Optional[np.ndarray] = None  # (N,) True for the drones on the outline (they come first)
+    outline_spacing: float = 0.0  # distance between neighbouring outline drones, unscaled
+
+    @property
+    def outline_count(self) -> int:
+        return 0 if self.outline is None else int(self.outline.sum())
 
     @property
     def count(self) -> int:
@@ -91,6 +113,8 @@ class DroneResult:
             "min_distance": self.min_distance * self.scale,
             "mean_distance": self.mean_distance * self.scale,
             "size": [float(v) for v in size],
+            "outline_count": self.outline_count,
+            "outline_spacing": self.outline_spacing * self.scale,
         }
 
 
@@ -105,6 +129,8 @@ def distribute(mesh: MeshData, options: DistributeOptions = None) -> DroneResult
         raise ValueError("count must be at least 1")
     if opt.color_mode not in COLOR_MODES:
         raise ValueError(f"unknown color mode {opt.color_mode!r}")
+    if opt.outline_amount not in OUTLINE_AMOUNTS:
+        raise ValueError(f"unknown outline amount {opt.outline_amount!r}")
     rng = np.random.default_rng(int(opt.seed))
 
     tris = mesh.triangles
@@ -140,16 +166,37 @@ def distribute(mesh: MeshData, options: DistributeOptions = None) -> DroneResult
     stretch = None if rho.min() == top else spacing_scale(rho / top)
     relative = None if density is None else (lambda p, t: density(p, t) / top)  # noqa: E731
 
-    sel = eliminate(pos, n, area, scale=stretch)
-    radius = poisson_radius(area, n)
+    # the outline first: its drones stand still while the fill makes room around them
+    lines, n_line, line_spacing = None, 0, 0.0
+    fill, fill_area = np.ones(len(pos), bool), area
+    if opt.outline and n > 3:
+        lines = _outline.find_lines(mesh, areas, normals, weights, opt, 2.0 * poisson_radius(area, n), rng,
+                                    audience)
+    if lines is not None:
+        n_line, line_spacing, fill, fill_area = _outline.split(lines, pos, area, n, opt)
+    if n_line:
+        l_pos, l_tri, l_bary = _outline.place(lines, n_line, line_spacing, opt.relax_iterations, tris)
+        n_line = len(l_pos)
+    n_fill = n - n_line
+    if fill.sum() < n_fill:  # the lines took fewer drones than planned and left no room for the rest
+        fill, fill_area = np.ones(len(pos), bool), area
+
+    f_pos, f_tri, f_bary = pos[fill], tri[fill], bary[fill]
+    f_stretch = None if stretch is None else stretch[fill]
+    sel = eliminate(f_pos, n_fill, fill_area, scale=f_stretch)
+    radius = poisson_radius(fill_area, n_fill)
     ideal = 2.0 * radius  # neighbour distance of a perfect hexagonal layout
-    points, p_tri, p_bary = pos[sel], tri[sel], bary[sel]
+    points, p_tri, p_bary = f_pos[sel], f_tri[sel], f_bary[sel]
     if opt.relax_iterations > 0 and n > 1:
         allowed = np.flatnonzero(weights > 0)
-        widest = 1.0 if stretch is None else float(stretch.max())
+        widest = 1.0 if f_stretch is None else float(f_stretch.max())
         projector = SurfaceProjector(tris[allowed], allowed, 0.5 * ideal, 0.15 * ideal * widest)
         points, p_tri, p_bary = relax(points, p_tri, p_bary, projector, ideal, opt.relax_iterations,
-                                      density=relative, max_scale=widest)
+                                      density=relative, max_scale=widest, fixed=l_pos if n_line else None)
+    if n_line:
+        points = np.concatenate([l_pos, points])
+        p_tri = np.concatenate([l_tri, p_tri])
+        p_bary = np.concatenate([l_bary, p_bary])
 
     if opt.color_mode == "area":
         cand_colors = _color.surface_colors(mesh, tri, bary)
@@ -159,6 +206,11 @@ def distribute(mesh: MeshData, options: DistributeOptions = None) -> DroneResult
         colors = _color.surface_colors(mesh, p_tri, p_bary)
     else:
         colors = np.ones((n, 3))
+    if n_line and opt.color_mode != "none":
+        # an outline drone shows the colour right under it, or the side of a colour border it marks
+        under = _color.surface_colors(mesh, p_tri[:n_line], p_bary[:n_line])
+        marked = lines.colors_at(points[:n_line])
+        colors[:n_line] = np.where(np.isnan(marked), under, marked)
     colors = _color.glow(colors, opt.min_brightness)
 
     dmin, dmean = spacing(points, radius)
@@ -178,6 +230,8 @@ def distribute(mesh: MeshData, options: DistributeOptions = None) -> DroneResult
         pivot=scale_pivot(lo, hi, opt.up_axis),
         options=opt,
         visibility=audience.visibility(points, p_tri) if audience is not None else np.ones(n),
+        outline=np.arange(n) < n_line,
+        outline_spacing=line_spacing if n_line else 0.0,
     )
 
 

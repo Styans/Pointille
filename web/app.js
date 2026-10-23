@@ -23,6 +23,12 @@ const ui = {
   facadeOpts: $("facade-opts"), view: $("view"), angle: $("angle"), angleOut: $("angle-out"), color: $("color"),
   spread: $("spread"), spreadOut: $("spread-out"), hidden: $("hidden"), hiddenOut: $("hidden-out"),
   glow: $("glow"), glowOut: $("glow-out"), glowField: $("glow-field"),
+  outline: $("outline"), outlineOpts: $("outline-opts"), olSilhouette: $("ol-silhouette"), olCreases: $("ol-creases"),
+  olBorders: $("ol-borders"), olColors: $("ol-colors"), olRelief: $("ol-relief"),
+  relief: $("relief"), reliefOut: $("relief-out"), reliefField: $("relief-field"), olDensity: $("ol-density"), olDensityOut: $("ol-density-out"),
+  olDensityField: $("ol-density-field"), olShare: $("ol-share"), olShareOut: $("ol-share-out"),
+  olShareField: $("ol-share-field"), crease: $("crease"), creaseOut: $("crease-out"), creaseField: $("crease-field"),
+  contrast: $("contrast"), contrastOut: $("contrast-out"), contrastField: $("contrast-field"),
   scaleMode: $("scale-mode"), minDist: $("min-dist"), minDistField: $("min-dist-field"), height: $("height"),
   heightField: $("height-field"), seed: $("seed"), relax: $("relax"), oversample: $("oversample"), auto: $("auto"),
   run: $("run"), error: $("error"), stats: $("stats"), downloads: $("downloads"), dlHint: $("dl-hint"),
@@ -301,12 +307,26 @@ function options() {
     hiddenDensity: +ui.hidden.value / 100,
     colorMode: ui.color.value,
     minBrightness: +ui.glow.value / 100,
+    outline: ui.outline.checked,
+    outlineSilhouette: ui.olSilhouette.checked,
+    outlineCreases: ui.olCreases.checked,
+    outlineBorders: ui.olBorders.checked,
+    outlineRelief: ui.olRelief.checked,
+    outlineColors: ui.olColors.checked,
+    outlineAmount: outlineAmount(),
+    outlineDensity: +ui.olDensity.value,
+    outlineShare: +ui.olShare.value / 100,
+    creaseAngle: +ui.crease.value,
+    reliefAngle: +ui.relief.value,
+    colorContrast: +ui.contrast.value / 100,
     scaleMode: ui.scaleMode.value,
     targetMinDistance: +ui.minDist.value || 1.5,
     targetHeight: +ui.height.value || 20,
     upAxis: 1, // three.js / glTF are Y-up
   };
 }
+
+const outlineAmount = () => document.querySelector('input[name="ol-amount"]:checked').value;
 
 function syncControls() {
   const facade = document.querySelector('input[name="area"]:checked').value === "facade";
@@ -316,6 +336,17 @@ function syncControls() {
   ui.hiddenOut.textContent = `${ui.hidden.value}%`;
   ui.glowOut.textContent = `${ui.glow.value}%`;
   ui.glowField.hidden = ui.color.value === "none";
+  ui.outlineOpts.hidden = !ui.outline.checked;
+  ui.olDensityField.hidden = outlineAmount() !== "density";
+  ui.olShareField.hidden = outlineAmount() !== "share";
+  ui.creaseField.hidden = !ui.olCreases.checked;
+  ui.reliefField.hidden = !ui.olRelief.checked;
+  ui.reliefOut.textContent = `${ui.relief.value}°`;
+  ui.contrastField.hidden = !ui.olColors.checked;
+  ui.olDensityOut.textContent = `×${(+ui.olDensity.value).toFixed(1)}`;
+  ui.olShareOut.textContent = `${ui.olShare.value}%`;
+  ui.creaseOut.textContent = `${ui.crease.value}°`;
+  ui.contrastOut.textContent = `${ui.contrast.value}%`;
   ui.minDistField.hidden = ui.scaleMode.value !== "min_distance";
   ui.heightField.hidden = ui.scaleMode.value !== "height";
 }
@@ -331,6 +362,10 @@ function showStats(result, ms) {
   // width x depth x height in the show frame (Z up)
   $("s-size").textContent = `${fmt(s.size[0])} × ${fmt(s.size[2])} × ${fmt(s.size[1])} м`;
   $("s-time").textContent = `Расчёт: ${(ms / 1000).toFixed(2)} с`;
+  $("s-outline-row").hidden = !result.options.outline;
+  $("s-outline").textContent = s.outlineCount
+    ? `${s.outlineCount} дронов, шаг ${fmt(s.outlineSpacing, 3)} м`
+    : "линий не нашлось";
   ui.stats.hidden = false;
   ui.downloads.hidden = false;
   const isGlb = state.source?.ext === "glb";
@@ -400,10 +435,12 @@ ui.count.addEventListener("input", () => {
   ui.countRange.value = rangeFromCount(+ui.count.value);
   schedule();
 });
-for (const el of [ui.view, ui.spread, ui.angle, ui.hidden, ui.color, ui.glow, ui.scaleMode, ui.minDist, ui.height, ui.seed, ui.relax, ui.oversample]) {
+for (const el of [ui.view, ui.spread, ui.angle, ui.hidden, ui.color, ui.glow, ui.outline, ui.olSilhouette, ui.olCreases,
+  ui.olBorders, ui.olColors, ui.olRelief, ui.relief, ui.olDensity, ui.olShare, ui.crease, ui.contrast, ui.scaleMode, ui.minDist, ui.height,
+  ui.seed, ui.relax, ui.oversample]) {
   el.addEventListener("input", schedule);
 }
-document.querySelectorAll('input[name="area"]').forEach((r) => r.addEventListener("change", schedule));
+document.querySelectorAll('input[name="area"], input[name="ol-amount"]').forEach((r) => r.addEventListener("change", schedule));
 ui.run.addEventListener("click", run);
 controls.addEventListener("end", () => ui.view.value === "camera" && isFacade() && schedule());
 const isFacade = () => document.querySelector('input[name="area"]:checked').value === "facade";
