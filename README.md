@@ -310,7 +310,7 @@ pointille model.obj -n 300 --color point --height 40     # OBJ, высота ф�
 ```bash
 pip install -e ".[test]"
 pytest                                   # ядро, GLB/CSV/PLY, CLI
-pip install "bpy==4.2.*"                 # Python 3.11: тесты аддона в headless Blender
+pip install "bpy==5.2.*"                 # Python 3.13: тесты аддона в headless Blender
 npm install
 npm test                                 # JS-ядро
 npm run e2e                              # браузер (Playwright): загрузка, цвета, скачивание GLB
