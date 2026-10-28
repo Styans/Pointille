@@ -56,6 +56,10 @@ class DistributeOptions:
     crease_angle: float = 40.0  # degrees between two faces that make a sharp edge
     relief_angle: float = 40.0  # degrees the surface must bend within a short stretch to draw a relief line
     color_contrast: float = 0.15  # OKLab difference that makes a colour border (black-white is 1)
+    # ``layout.compose`` (``count`` is the most drones it may use, the corners ``target_min_distance`` apart):
+    # the lines are this many times and the fill this many times that far apart
+    line_ratio: float = 1.5
+    fill_ratio: float = 3.0
     # safety scaling: "none" | "min_distance" | "height"
     scale_mode: str = "none"
     target_min_distance: float = 1.5
@@ -79,6 +83,13 @@ class DroneResult:
     visibility: Optional[np.ndarray] = None  # (N,) share of the audience that sees each drone
     outline: Optional[np.ndarray] = None  # (N,) True for the drones on the outline (they come first)
     outline_spacing: float = 0.0  # distance between neighbouring outline drones, unscaled
+    # ``layout.compose`` only
+    kind: Optional[np.ndarray] = None  # (N,) 0 in a corner, 1 on a line, 2 in the fill (in this order)
+    part: Optional[np.ndarray] = None  # (N,) which of the parts each drone is on
+    budget: int = 0  # the most drones the layout could use
+    needed: int = 0  # how many it would have used at the spacing asked for
+    spread: float = 1.0  # how much wider than asked the lines (and corners) stand, to stay within the budget
+    fill_spread: float = 1.0  # ... and the fill (it gives way first)
 
     @property
     def outline_count(self) -> int:
@@ -115,6 +126,10 @@ class DroneResult:
             "size": [float(v) for v in size],
             "outline_count": self.outline_count,
             "outline_spacing": self.outline_spacing * self.scale,
+            "budget": self.budget,
+            "needed": self.needed,
+            "spread": self.spread,
+            "fill_spread": self.fill_spread,
         }
 
 
@@ -135,23 +150,8 @@ def distribute(mesh: MeshData, options: DistributeOptions = None) -> DroneResult
 
     tris = mesh.triangles
     areas, normals = triangle_areas_normals(tris)
-    weights = areas.copy()
-    audience = density = None
-    if opt.facade:
-        audience = Audience(tris, normals, view_dir=opt.view_dir, view_point=opt.view_point,
-                            spread=opt.audience_spread, facade_angle=opt.facade_angle,
-                            occlusion=opt.occlusion, up_axis=opt.up_axis)
-        hidden = min(max(float(opt.hidden_density), 0.0), 1.0)
-        if hidden <= 0:
-            weights *= audience.triangle_mask()
-            if weights.sum() <= 0:
-                raise ValueError("no part of the surface faces the audience")
-        if hidden < 1:
-            # full density where the whole audience sees the surface, ``hidden`` where nobody does
-            density = lambda p, t: hidden + (1.0 - hidden) * audience.visibility(p, t)  # noqa: E731
+    weights, audience, density = _audience(tris, areas, normals, opt)
     total_area = float(weights.sum())
-    if total_area <= 0:
-        raise ValueError("the model has no surface area")
 
     wanted = max(int(math.ceil(max(opt.oversample, 2.0) * n)), n + 1)
     pos, tri, bary, rho, mean_rho = _gather_candidates(tris, weights, wanted, rng, density)
@@ -233,6 +233,29 @@ def distribute(mesh: MeshData, options: DistributeOptions = None) -> DroneResult
         outline=np.arange(n) < n_line,
         outline_spacing=line_spacing if n_line else 0.0,
     )
+
+
+def _audience(tris, areas, normals, opt):
+    """(triangle weights, audience, density) of the surface: the area of each triangle, in facade mode
+    zero where nobody may see it; the audience, None without facade mode; the density of drones at a
+    point, None for an even one."""
+    weights = areas.copy()
+    audience = density = None
+    if opt.facade:
+        audience = Audience(tris, normals, view_dir=opt.view_dir, view_point=opt.view_point,
+                            spread=opt.audience_spread, facade_angle=opt.facade_angle,
+                            occlusion=opt.occlusion, up_axis=opt.up_axis)
+        hidden = min(max(float(opt.hidden_density), 0.0), 1.0)
+        if hidden <= 0:
+            weights *= audience.triangle_mask()
+            if weights.sum() <= 0:
+                raise ValueError("no part of the surface faces the audience")
+        if hidden < 1:
+            # full density where the whole audience sees the surface, ``hidden`` where nobody does
+            density = lambda p, t: hidden + (1.0 - hidden) * audience.visibility(p, t)  # noqa: E731
+    if float(weights.sum()) <= 0:
+        raise ValueError("the model has no surface area")
+    return weights, audience, density
 
 
 def _gather_candidates(tris, weights, wanted, rng, density):

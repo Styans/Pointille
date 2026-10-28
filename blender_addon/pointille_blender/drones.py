@@ -25,6 +25,9 @@ VISIBILITY_ATTR = "pointille_visibility"  # share of the audience that sees the 
 FORMATION_GROUP = "Pointille"  # vertex group of all vertices, the markers of a Skybrush formation
 OUTLINE_ATTR = "pointille_outline"  # True for the vertices on the outline
 OUTLINE_GROUP = "Pointille обводка"  # the outline vertices, for Skybrush effects of their own
+KIND_ATTR = "pointille_kind"  # layout with a budget: 0 in a corner, 1 on a line, 2 in the fill
+CORNER_GROUP = "Pointille углы"
+PART_GROUP_PREFIX = "Pointille: "  # + object name: the vertices on each of several objects
 INSTANCES_KEY = "pointille_instances"
 INSTANCES_NAME = "Pointille Instances"
 # 0.1 showed glowing balls on the vertices as a separate child object
@@ -65,7 +68,7 @@ def resolve_sources(context):
         if is_ours(obj):
             drones = find_drones(obj)
             candidates = source_objects(drones) if drones else []
-        elif obj.type == "MESH":
+        elif obj.type in ("MESH", "CURVE"):
             candidates = [obj]
         else:
             candidates = []
@@ -208,10 +211,10 @@ def ensure_formation_group(obj):
     return name
 
 
-def set_outline_group(obj, outline):
+def set_outline_group(obj, outline, name=OUTLINE_GROUP):
     """The outline vertices in their group, made afresh: the old layout's indices mean nothing now.
     No outline, no group."""
-    group = obj.vertex_groups.get(OUTLINE_GROUP)
+    group = obj.vertex_groups.get(name)
     on = np.flatnonzero(outline) if outline is not None else np.zeros(0, np.int64)
     if not len(on):
         if group is not None:
@@ -219,12 +222,25 @@ def set_outline_group(obj, outline):
         return
     if group is None:
         active = obj.vertex_groups.active_index if len(obj.vertex_groups) else None
-        group = obj.vertex_groups.new(name=OUTLINE_GROUP)
+        group = obj.vertex_groups.new(name=name)
         if active is not None:  # the user's active group stays active
             obj.vertex_groups.active_index = active
     else:
         group.remove(list(range(len(obj.data.vertices))))
     group.add(on.tolist(), 1.0, "REPLACE")
+
+
+def set_part_groups(obj, sources, result):
+    """A layout with a budget: a group of the corner vertices, and with several objects a group of the
+    vertices on each (``Pointille: <name>``), for Skybrush effects of their own."""
+    kind = result.kind
+    set_outline_group(obj, None if kind is None else kind == 0, CORNER_GROUP)
+    names = {PART_GROUP_PREFIX + s.name for s in sources} if result.part is not None and len(sources) > 1 else set()
+    for g in [g for g in obj.vertex_groups if g.name.startswith(PART_GROUP_PREFIX) and g.name not in names]:
+        obj.vertex_groups.remove(g)
+    if names:
+        for k, s in enumerate(sources):
+            set_outline_group(obj, result.part == k, PART_GROUP_PREFIX + s.name)
 
 
 def write_drones(context, sources, result):
@@ -245,6 +261,8 @@ def write_drones(context, sources, result):
             "value", result.visibility.astype(np.float32))
     if result.outline is not None:
         mesh.attributes.new(OUTLINE_ATTR, "BOOLEAN", "POINT").data.foreach_set("value", result.outline)
+    if result.kind is not None:
+        mesh.attributes.new(KIND_ATTR, "INT", "POINT").data.foreach_set("value", result.kind.astype(np.int32))
     mesh.update()
 
     if obj is None:
@@ -260,14 +278,33 @@ def write_drones(context, sources, result):
         restore_groups(obj, groups, old_count, active)
     ensure_formation_group(obj)
     set_outline_group(obj, result.outline)
+    set_part_groups(obj, sources, result)
+    if result.kind is not None:
+        kind = np.bincount(result.kind, minlength=3)
+        obj["pointille_budget"] = int(result.budget)
+        obj["pointille_needed"] = int(result.needed)
+        obj["pointille_spread"] = float(result.spread)
+        obj["pointille_fill_spread"] = float(getattr(result, "fill_spread", result.spread))
+        obj["pointille_kinds"] = [int(v) for v in kind[:3]]
+        obj["pointille_leftover"] = int(kind[3]) if len(kind) > 3 else 0  # parked or stars (``core.leftover``)
+    else:
+        for key in ("pointille_budget", "pointille_needed", "pointille_spread", "pointille_fill_spread",
+                    "pointille_kinds", "pointille_leftover"):
+            if key in obj:
+                del obj[key]
     obj[DRONES_KEY] = 1
     obj[SOURCES_KEY] = "\n".join(s.name for s in sources)
-    # follow the model when it is moved; vertices are stored in world space
-    obj.parent = anchor
-    try:
-        obj.matrix_parent_inverse = anchor.matrix_world.inverted()
-    except ValueError:  # degenerate model transform
-        obj.parent = None
+    # follow the model when it is moved; vertices are stored in world space. A curve with path animation
+    # moves its children along the path: then the curve's own parent is followed, if any
+    parent = anchor
+    if anchor.type == "CURVE" and anchor.data.use_path:
+        parent = anchor.parent
+    obj.parent = parent
+    if parent is not None:
+        try:
+            obj.matrix_parent_inverse = parent.matrix_world.inverted()
+        except ValueError:  # degenerate model transform
+            obj.parent = None
     obj.matrix_basis = Matrix.Identity(4)
     remove_legacy_preview(obj)
     apply_instance(obj)

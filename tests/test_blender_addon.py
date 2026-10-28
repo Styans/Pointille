@@ -40,6 +40,7 @@ def model(addon, textured_glb):
     for o in bpy.data.objects:
         o.select_set(o == obj)
     bpy.context.view_layer.objects.active = obj
+    bpy.context.scene.pointille.count_mode = "EXACT"  # the layout with a budget has tests of its own
     return obj
 
 
@@ -211,6 +212,222 @@ def test_outline_vertices_in_their_own_group(addon, model):
     bpy.ops.pointille.distribute(count=150)
     assert addon.drones.OUTLINE_GROUP not in points.vertex_groups
     assert not addon.drones.outline_mask(points).any()
+
+
+def front_limit(min_distance):
+    s = bpy.context.scene.pointille
+    s.count_mode = "LIMIT"
+    s.target_min_distance = min_distance
+    s.area_mode, s.view, s.audience_spread, s.hidden_density = "FACADE", "FRONT", 0.0, 0.0
+    return s
+
+
+def kinds_of(addon, points):
+    kind = np.empty(len(points.data.vertices), np.int32)
+    points.data.attributes[addon.drones.KIND_ATTR].data.foreach_get("value", kind)
+    return kind
+
+
+def test_limit_layout_of_several_objects(addon, model):
+    front_limit(0.12)
+    bpy.ops.mesh.primitive_plane_add(size=2.0, location=(3.0, 0.0, 2.0), rotation=(np.pi / 2, 0.0, 0.0))
+    plane = bpy.context.active_object
+    plane.pointille_part.role = "OUTLINE"  # like the rock under the tiger
+    for o in (model, plane):
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    before = model_fingerprint(model)
+    assert bpy.ops.pointille.distribute(count=2000) == {"FINISHED"}
+    assert model_fingerprint(model) == before
+    points = drones_of(addon, model)
+    n = len(points.data.vertices)
+    assert 50 < n < 2000  # what the figure needs, not the whole budget
+    assert points["pointille_budget"] == 2000 and points["pointille_count"] == n
+    assert points["pointille_min_distance"] >= 0.12 - 1e-5
+    groups = group_contents(points)
+    on_plane = groups[addon.drones.PART_GROUP_PREFIX + plane.name]
+    on_model = groups[addon.drones.PART_GROUP_PREFIX + model.name]
+    assert sorted(on_plane + on_model) == list(range(n))
+    pts = addon.drones.world_positions(points)
+    edge = np.maximum(np.abs(pts[on_plane, 0] - 3.0), np.abs(pts[on_plane, 2] - 2.0))
+    assert len(on_plane) > 20 and np.all(edge > 0.95)  # only the border of the plane, no fill
+    kind = kinds_of(addon, points)
+    assert sorted(points["pointille_kinds"]) == sorted(np.bincount(kind, minlength=3).tolist())
+    assert (kind[on_model] == 2).any() and not (kind[on_plane] == 2).any()
+    plane_corners = [i for i in groups[addon.drones.CORNER_GROUP] if i in set(on_plane)]
+    assert len(plane_corners) == 4
+    assert group_contents(points)[addon.drones.OUTLINE_GROUP] == np.flatnonzero(kind < 2).tolist()
+
+    assert bpy.ops.pointille.distribute(count=40) == {"FINISHED"}  # less than the figure needs
+    assert len(points.data.vertices) <= 40 and points["pointille_spread"] > 1.0
+    plane.select_set(False)  # one object again: no groups per object
+    assert bpy.ops.pointille.distribute(count=2000) == {"FINISHED"}
+    assert not any(g.name.startswith(addon.drones.PART_GROUP_PREFIX) for g in points.vertex_groups)
+    s = bpy.context.scene.pointille
+    s.count_mode = "EXACT"  # the old way: exactly so many, no kinds
+    assert bpy.ops.pointille.distribute(count=70) == {"FINISHED"}
+    assert len(points.data.vertices) == 70 and "pointille_budget" not in points
+    assert addon.drones.CORNER_GROUP not in points.vertex_groups
+
+
+def test_pattern_by_colour_groups_and_eyedropper(addon, model):
+    front_limit(0.1)
+    part = model.pointille_part
+    part.role, part.group_count = "PATTERN", 4
+    assert bpy.ops.pointille.find_colors(object_name=model.name) == {"FINISHED"}
+    assert len(part.groups) == 4
+    assert sum(g.share for g in part.groups) == pytest.approx(100.0, abs=0.5)
+    for g in part.groups:  # the red quadrant only: top left, seen from the front above the centre
+        r, gr, b = g.color
+        g.use = r > 0.5 and gr < 0.2 and b < 0.2
+    assert sum(g.use for g in part.groups) == 1
+    assert bpy.ops.pointille.distribute(count=3000) == {"FINISHED"}
+    points = drones_of(addon, model)
+    pts, kind = addon.drones.world_positions(points), kinds_of(addon, points)
+    fill = pts[kind == 2]
+    assert len(fill) > 5 and np.all(fill[:, 2] > 2.0 - 0.05)
+
+    part.pick = "EYEDROPPER"
+    assert bpy.ops.pointille.pick_add(object_name=model.name) == {"FINISHED"}
+    part.picks[0].color = (0.0, 1.0, 0.0)  # green: top right, below the centre from the front
+    assert bpy.ops.pointille.distribute(count=3000) == {"FINISHED"}
+    pts, kind = addon.drones.world_positions(points), kinds_of(addon, points)
+    fill = pts[kind == 2]
+    assert len(fill) > 5 and np.all(fill[:, 2] < 2.0 + 0.05)
+    assert bpy.ops.pointille.pick_remove(object_name=model.name, index=0) == {"FINISHED"}
+    assert not len(part.picks)
+
+
+def fill_gap(addon, points):
+    """Median distance between neighbouring fill vertices: a line spacing on rings, a fill spacing in a lattice."""
+    fill = addon.drones.world_positions(points)[kinds_of(addon, points) == 2]
+    return float(np.median(addon.pointille.core.spatial.nn_distances(fill, 1.0))), len(fill)
+
+
+def test_round_body_takes_rings(addon, model):
+    s = front_limit(0.6)  # lines 0.9 apart, the fill 1.8
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=5.0, segments=64, ring_count=32, location=(20.0, 0.0, 6.0))
+    ball = bpy.context.active_object
+    for o in bpy.data.objects:
+        o.select_set(o == ball)
+    assert ball.pointille_part.shapes  # simple shapes are on by default
+    assert bpy.ops.pointille.distribute(count=2000) == {"FINISHED"}
+    points = drones_of(addon, ball)
+    gap, n = fill_gap(addon, points)
+    assert n > 20 and gap < 1.2  # dotted rings
+    ball.pointille_part.shapes = False
+    assert bpy.ops.pointille.distribute(count=2000) == {"FINISHED"}
+    assert fill_gap(addon, points)[0] > 1.6  # a lattice
+    ball.pointille_part.pattern = "RINGS"  # rings asked for
+    assert bpy.ops.pointille.distribute(count=2000) == {"FINISHED"}
+    assert fill_gap(addon, points)[0] < 1.2
+    assert s.count_mode == "LIMIT"
+
+
+def test_curves_from_a_model_and_by_hand(addon, model):
+    s = front_limit(0.1)
+    s.curve_depth = "FLAT"
+    before = model_fingerprint(model)
+    assert bpy.ops.pointille.build_curves() == {"FINISHED"}
+    assert model_fingerprint(model) == before
+    curves = addon.sketch.find_curves(model)
+    assert curves is not None and curves.type == "CURVE" and curves.parent == model
+    assert bpy.context.active_object == curves and len(curves.data.splines) >= 2  # the outline and the quadrants
+    shell = bpy.data.objects[curves[addon.sketch.SHELL_KEY]]
+    assert shell.hide_render and shell.hide_get() and shell.parent == curves
+    # flat: every point of the drawing in one plane facing the audience (-Y)
+    ys = [tuple(curves.matrix_world @ p.co.xyz)[1] for sp in curves.data.splines for p in sp.points]
+    assert max(ys) - min(ys) < 1e-3
+    assert bpy.ops.pointille.distribute(count=3000) == {"FINISHED"}
+    points = drones_of(addon, curves)
+    n_all = len(points.data.vertices)
+    pts, kind = addon.drones.world_positions(points), kinds_of(addon, points)
+    assert n_all > 50 and (kind == 2).any() and np.ptp(pts[:, 1]) < 0.05
+    assert points["pointille_min_distance"] >= 0.1 - 1e-5
+    longest = max(curves.data.splines, key=lambda sp: len(sp.points))
+    curves.data.splines.remove(longest)  # edited by hand: one line less, fewer drones
+    assert bpy.ops.pointille.distribute(count=3000) == {"FINISHED"}
+    assert len(points.data.vertices) < n_all
+
+    # any curve takes drones: a circle drawn by hand, evenly round it
+    bpy.ops.curve.primitive_bezier_circle_add(radius=3.0, location=(10.0, 0.0, 0.0), rotation=(np.pi / 2, 0.0, 0.0))
+    circle = bpy.context.active_object
+    circle.pointille_part.role = "OUTLINE"
+    for o in bpy.data.objects:
+        o.select_set(o == circle)
+    assert bpy.ops.pointille.distribute(count=500) == {"FINISHED"}
+    ring = addon.drones.world_positions(drones_of(addon, circle))
+    r = np.hypot(ring[:, 0] - 10.0, ring[:, 2])
+    assert len(ring) == round(2 * np.pi * 3.0 / 0.15) and np.allclose(r, 3.0, atol=0.02)
+    model.select_set(True)  # a model and curves at once: one or the other
+    with pytest.raises(RuntimeError):
+        bpy.ops.pointille.distribute(count=500)
+
+
+def test_around_draws_a_figure_all_round(addon, model):
+    s = bpy.context.scene.pointille
+    s.area_mode = "AROUND"
+    s.count_mode = "EXACT"  # all round always takes the count as its budget
+    s.target_min_distance = 0.6
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=8.0, segments=64, ring_count=32, location=(30.0, 0.0, 9.0))
+    ball = bpy.context.active_object
+    for o in bpy.data.objects:
+        o.select_set(o == ball)
+    assert bpy.ops.pointille.distribute(count=400) == {"FINISHED"}
+    points = drones_of(addon, ball)
+    pts = addon.drones.world_positions(points)
+    assert 50 < len(pts) <= 400
+    assert points["pointille_min_distance"] >= 0.6 - 1e-5
+    assert (pts[:, 1] > 4.0).any() and (pts[:, 1] < -4.0).any()  # front and back: seen from every side
+
+
+def test_leftover_drones_are_parked_or_stars(addon, model):
+    s = bpy.context.scene.pointille
+    s.area_mode = "AROUND"
+    s.target_min_distance = 0.6
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=3.0, segments=48, ring_count=24, location=(-30.0, 0.0, 12.0))
+    ball = bpy.context.active_object
+    for o in bpy.data.objects:
+        o.select_set(o == ball)
+    for mode in ("PARK", "STARS"):
+        s.leftover_mode = mode
+        assert bpy.ops.pointille.distribute(count=1500) == {"FINISHED"}
+        points = drones_of(addon, ball)
+        pts = addon.drones.world_positions(points)
+        assert len(pts) == 1500  # every drone of the budget has a place
+        assert 0 < points["pointille_leftover"] < 1500
+        assert points["pointille_min_distance"] >= 0.6 - 1e-5
+        if mode == "PARK":  # dark, under the ball
+            rest = pts[-points["pointille_leftover"]:]
+            assert (rest[:, 2] < 12.0 - 3.0).all()
+    s.leftover_mode = "NONE"
+
+
+def test_curves_as_a_volume(addon, model):
+    s = front_limit(0.6)
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=5.0, segments=64, ring_count=32, location=(20.0, 0.0, 6.0))
+    ball = bpy.context.active_object
+    for o in bpy.data.objects:
+        o.select_set(o == ball)
+    s.curve_depth = "VOLUME"
+    assert bpy.ops.pointille.build_curves() == {"FINISHED"}
+    curves = addon.sketch.find_curves(ball)
+    assert curves.get(addon.sketch.SOLID_KEY) and addon.sketch.SHELL_KEY not in curves  # no shell: no fill
+    assert any(m.name.startswith(addon.sketch.SLICE_PREFIX) for m in curves.data.materials)
+    read = addon.sketch.read(curves, bpy.context.evaluated_depsgraph_get(), addon.adapter)
+    assert read.solid and sum(c.kind == "slice" for c in read.curves) >= 3
+    assert bpy.ops.pointille.distribute(count=2000) == {"FINISHED"}
+    points = drones_of(addon, curves)
+    pts, kind = addon.drones.world_positions(points), kinds_of(addon, points)
+    assert len(pts) > 50 and not (kind == 2).any()
+    assert (pts[:, 1] > 3.0).any() and (pts[:, 1] < -3.0).any()  # rings all round: front and back
+    assert points["pointille_min_distance"] >= 0.6 - 1e-5
+    for o in bpy.data.objects:  # drawn again flat: a sketch with a shell, no longer a volume
+        o.select_set(o == ball)
+    s.curve_depth = "FLAT"
+    assert bpy.ops.pointille.build_curves() == {"FINISHED"}
+    assert addon.sketch.find_curves(ball) == curves and not curves.get(addon.sketch.SOLID_KEY)
+    assert addon.sketch.SHELL_KEY in curves
 
 
 def test_scale_to_min_distance(addon, model):

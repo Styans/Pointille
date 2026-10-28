@@ -56,6 +56,7 @@ CORNER_TURN = 45.0  # a line bending sharper than this (degrees) keeps a drone i
 CORNER_GAP = 0.8  # corner drones closer than this many line spacings to a stronger one are dropped
 CORNER_WINDOW = 0.25  # bends and lengths are judged over this many fill spacings of line
 LINE_GAP = 0.7  # where two lines run close, drones nearer than this many line spacings to another go
+GRADE = 0.2  # with no count to meet, the spacing grows by this much per length of line away from a corner
 VIEW_PIXEL = 1.0 / 12  # pixel of the views relief and colours are read from, in fill spacings
 VIEW_SIGMA = 2.0  # the views are smoothed over this many pixels: finer detail draws no line
 _INSET = 1e-3  # points on a mesh edge sit a hair inside their triangle, so sight tests do not graze it
@@ -133,16 +134,21 @@ class _Chain:
 
     def at(self, x: np.ndarray, tris, surface):
         """Points at distances ``x`` along the line: (pos, tri, bary)."""
+        pos, tri, bary, found = self.at_found(x, tris, surface)
+        return pos[found], tri[found], bary[found]
+
+    def at_found(self, x: np.ndarray, tris, surface):
+        """Points at distances ``x`` along the line: (pos, tri, bary, found); a point of a line read
+        from a view that does not land on the surface is not found."""
         arc = np.interp(x, self.ck, self.tk)
         i = np.clip(np.searchsorted(self.t, arc, side="right") - 1, 0, len(self.t) - 2)
         f = np.clip((arc - self.t[i]) / np.maximum(self.t[i + 1] - self.t[i], 1e-300), 0.0, 1.0)[:, None]
         if self.tri is not None:
             bary = self.ba[i] * (1.0 - f) + self.bb[i] * f
             tri = self.tri[i]
-            return np.einsum("ij,ijk->ik", bary, tris[tri]), tri, bary
+            return np.einsum("ij,ijk->ik", bary, tris[tri]), tri, bary, np.ones(len(x), bool)
         q = self.p if self.q is None else self.q
-        pos, tri, bary, found = surface.project(q[i] * (1.0 - f) + q[i + 1] * f)
-        return pos[found], tri[found], bary[found]
+        return surface.project(q[i] * (1.0 - f) + q[i + 1] * f)
 
     def node(self, i: int) -> np.ndarray:
         """Node ``i`` on the model."""
@@ -171,6 +177,8 @@ class Lines:
     chains: List[_Chain]
     corners: tuple  # (node, pos, tri, bary), strongest first
     surface: Optional[SurfaceProjector] = None  # puts drones on colour borders onto the surface
+    # of each corner: 2 + degree where lines end (3) or meet, up to 2 for a bend (1 - cos of its angle)
+    strength: Optional[np.ndarray] = None
 
     @property
     def length(self) -> float:
@@ -329,7 +337,7 @@ def find_lines(mesh, areas, normals, weights, opt, spacing: float, rng, audience
     node, c_pos, c_tri, c_bary, strength = (np.concatenate([c[i] for c in corners]) for i in range(5))
     order = np.argsort(-strength, kind="stable")
     return Lines(pos, tri, bary, color, step, chains, (node[order], c_pos[order], c_tri[order], c_bary[order]),
-                 surface)
+                 surface, strength[order])
 
 
 def split(lines: Lines, cand_pos: np.ndarray, area: float, count: int, opt):
@@ -427,6 +435,101 @@ def place(lines: Lines, count: int, spacing: float, iterations: int, tris: np.nd
         b = np.concatenate([b[:n_corners], rb])
     keep = _park(p, LINE_GAP * spacing)  # the corners first
     return p[keep], t[keep], b[keep]
+
+
+def place_graded(lines: Lines, near: float, spacing: float, tris: np.ndarray):
+    """Drones on the lines with no count to meet, densest at the corners: a
+    drone in every corner, the next ones ``near`` from it, the spacing growing
+    by ``GRADE`` per length of line to ``spacing``; loops with no corner get
+    ``spacing`` all round. The loose end of a line keeps a drone but is no
+    corner: a noisy model breaks its lines into many pieces. Where lines run
+    close, one drone stands for both.
+
+    Returns (positions, triangle_ids, barycentrics, kind, local spacing);
+    ``kind`` is 0 for the corner drones (they come first) and 1 on the lines.
+    """
+    c_node, c_pos, c_tri, c_bary = lines.corners
+    strength = lines.strength if lines.strength is not None else np.full(len(c_node), 4.0)
+    chosen = []
+    for i in range(len(c_node)):
+        if not chosen or np.linalg.norm(c_pos[chosen] - c_pos[i], axis=1).min() >= CORNER_GAP * spacing:
+            chosen.append(i)
+    chosen = np.asarray(chosen, np.int64)
+    loose = c_node[chosen[strength[chosen] == 3.0]].tolist()  # 2 + degree 1
+    # how far into a line its first drone stands, in local spacings: one from a corner drone, half
+    # from a corner merged into a stronger one nearby (that one may lie off the line: drones too close
+    # to it go below); the spacing grows away from either. Elsewhere half a spacing and no growing
+    lead, graded = {}, set()
+    if len(chosen):
+        gap, _ = nearest(c_pos, c_pos[chosen], CORNER_GAP * spacing)
+        for node, g in zip(c_node.tolist(), gap.tolist()):
+            if g < CORNER_GAP * spacing:
+                lead[node] = 1.0 if g <= 0 else 0.5
+                graded.add(node)
+    for node in loose:
+        lead[node] = 1.0  # the next drone a whole line spacing in
+        graded.discard(node)
+
+    corner = strength[chosen] != 3.0
+    order = np.argsort(~corner, kind="stable")  # the corners first, then the loose ends
+    chosen, corner = chosen[order], corner[order]
+    p, t, b = [c_pos[chosen]], [c_tri[chosen]], [c_bary[chosen]]
+    s = [np.where(corner, near, spacing)]
+    for chain in lines.chains:
+        ell = chain.length
+        if ell <= 0:
+            continue
+        if chain.closed:
+            m = max(int(round(ell / spacing)), 1)
+            x = np.arange(m) * (ell / m)
+            sigma = np.full(m, spacing)
+        else:
+            # F(x) counts local spacings from the start: drones stand at whole steps of it
+            k = max(int(math.ceil(ell / (0.125 * near))), 2) + 1
+            xs = np.linspace(0.0, ell, k)
+            dist = np.full(k, np.inf)
+            if chain.start in graded:
+                dist = np.minimum(dist, xs)
+            if chain.end in graded:
+                dist = np.minimum(dist, ell - xs)
+            local = np.minimum(spacing, near + GRADE * dist)
+            F = np.r_[0.0, np.cumsum(np.diff(xs) * 0.5 * (1.0 / local[1:] + 1.0 / local[:-1]))]
+            h0, h1 = lead.get(chain.start, 0.5), lead.get(chain.end, 0.5)
+            room = F[-1] - h0 - h1
+            if room < 0:
+                continue  # the corners at both ends stand close enough
+            m = int(round(room)) + 1
+            at = np.array([h0 + 0.5 * room]) if m == 1 else h0 + np.arange(m) * (room / (m - 1))
+            x = np.interp(at, F, xs)
+            sigma = np.interp(x, xs, local)
+        pos, tri, bary, found = chain.at_found(x, tris, lines.surface)
+        for out, part in zip((p, t, b, s), (pos, tri, bary, sigma)):
+            out.append(part[found])
+    p, t, b, s = (np.concatenate(x) for x in (p, t, b, s))
+    kind = np.ones(len(p), np.int8)
+    kind[: int(corner.sum())] = 0
+    keep = park(p, np.maximum(near, LINE_GAP * s))  # the corners first
+    return p[keep], t[keep], b[keep], kind[keep], s[keep]
+
+
+def park(points: np.ndarray, radius) -> np.ndarray:
+    """Indices of the points (taken in order) farther than their own ``radius`` (one for all, or one
+    per point) from every one kept before."""
+    radius = np.broadcast_to(np.asarray(radius, dtype=np.float64), (len(points),))
+    if not len(points):
+        return np.zeros(0, np.int64)
+    cell = float(radius.max())
+    cells = {}
+    kept = []
+    keys = np.floor(points / cell).astype(np.int64).tolist()
+    for n, (p, (x, y, z), r) in enumerate(zip(points.tolist(), keys, (radius * radius).tolist())):
+        if any((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2 < r
+               for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+               for q in cells.get((x + dx, y + dy, z + dz), ())):
+            continue
+        cells.setdefault((x, y, z), []).append(p)
+        kept.append(n)
+    return np.asarray(kept, np.int64)
 
 
 def _allocate(want: np.ndarray, total: int) -> np.ndarray:
@@ -778,7 +881,8 @@ def _render(tris, eye, toward, h):
     nothing. ``eye`` None is a viewer far away in the direction ``toward``;
     otherwise ``h`` is the pixel size at the model's centre.
 
-    Returns dict(tri (H, W), -1 where no triangle; bary (H, W, 3); h)."""
+    Returns dict(tri (H, W), -1 where no triangle; bary (H, W, 3); h; lo, hi): pixel (row, col)
+    is centred on the picture point (lo[0] + (col + 0.5) h, hi[1] - (row + 0.5) h)."""
     if eye is None:
         d, e1, e2 = view_basis(toward)
         x, y, near = tris @ e1, tris @ e2, tris @ d  # nearer is larger
@@ -853,7 +957,7 @@ def _render(tris, eye, toward, h):
         corrected = weights[hit] / w[seen[hit]]
         weights[hit] = corrected / corrected.sum(axis=1, keepdims=True)
     seen[hit] = ids[seen[hit]]
-    return dict(tri=seen.reshape(H, W), bary=weights.reshape(H, W, 3), h=h)
+    return dict(tri=seen.reshape(H, W), bary=weights.reshape(H, W, 3), h=h, lo=lo, hi=hi)
 
 
 def _shift(a, dy, dx, fill=0.0):

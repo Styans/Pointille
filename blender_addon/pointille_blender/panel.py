@@ -26,8 +26,24 @@ class POINTILLE_PT_main(bpy.types.Panel):
         else:
             box.label(text="Выберите меш-модель", icon="ERROR")
 
-        layout.prop(s, "count")
+        layout.row().prop(s, "count_mode", expand=True)
+        limit = s.count_mode == "LIMIT"
+        if limit:
+            col = layout.column(align=True)
+            col.prop(s, "count", text="Макс. вершин")
+            col.prop(s, "leftover_mode")
+            col.prop(s, "target_min_distance")
+            col.prop(s, "line_ratio")
+            col.prop(s, "fill_ratio")
+        else:
+            layout.prop(s, "count")
         layout.prop(s, "area_mode")
+        if s.area_mode == "AROUND":
+            col = layout.column(align=True)
+            col.label(text="Силуэт и детали видны со всех сторон", icon="ORIENTATION_GIMBAL")
+            col.label(text="Круглые тела — рёбра и кольца, персонажи — ряды, глаза, корона")
+            if not limit:
+                layout.prop(s, "leftover_mode")
         if s.area_mode == "FACADE":
             col = layout.column(align=True)
             col.prop(s, "view")
@@ -38,8 +54,11 @@ class POINTILLE_PT_main(bpy.types.Panel):
         if s.color_mode != "NONE":
             layout.prop(s, "min_brightness", slider=True)
 
-        layout.prop(s, "outline")
-        if s.outline:
+        if limit:
+            self.draw_parts(context, layout, s, sources)
+        else:
+            layout.prop(s, "outline")
+        if s.outline and not limit:
             col = layout.column(align=True)
             col.prop(s, "outline_lines")
             col.prop(s, "outline_amount", expand=True)
@@ -59,13 +78,83 @@ class POINTILLE_PT_main(bpy.types.Panel):
         col = layout.column(heading="Безопасность")
         col.prop(s, "scale_mode")
         if s.scale_mode == "MIN_DISTANCE":
-            col.prop(s, "target_min_distance")
+            if limit:
+                col.label(text="Мин. дистанция и так соблюдается", icon="CHECKMARK")
+            else:
+                col.prop(s, "target_min_distance")
         elif s.scale_mode == "HEIGHT":
             col.prop(s, "target_height")
+            if limit:
+                col.label(text="Дистанция — в размере фигуры после масштаба", icon="INFO")
 
         row = layout.row()
         row.scale_y = 1.6
         row.operator("pointille.distribute", icon="VERTEXSEL")
+
+    def draw_parts(self, context, layout, s, sources):
+        """Each selected object's role; the settings of the active one."""
+        if not sources:
+            return
+        box = layout.box()
+        box.label(text="Объекты и как их распределить", icon="OUTLINER")
+        col = box.column(align=True)
+        for obj in sources:
+            row = col.row(align=True)
+            icon = "OUTLINER_OB_CURVE" if obj.type == "CURVE" else "MESH_DATA"
+            row.label(text=obj.name, icon="RADIOBUT_ON" if obj == context.active_object else icon)
+            row.prop(obj.pointille_part, "role", text="")
+        obj = context.active_object if context.active_object in sources else sources[0]
+        part = obj.pointille_part
+        sub = box.column()
+        sub.use_property_split = True
+        sub.label(text=f"Настройки: {obj.name}", icon="PREFERENCES")
+        if obj.type == "CURVE":  # a drawing: the drones go on its curves, the fill inside the closed ones
+            sub.label(text="Вершины встанут по кривым", icon="CURVE_BEZCURVE")
+            if part.role != "OUTLINE":
+                sub.prop(part, "pattern")
+            return
+        row = box.row(align=True)
+        row.prop(s, "curve_depth", text="")
+        row.operator("pointille.build_curves", icon="CURVE_BEZCURVE")
+        if part.role != "FILL":
+            sub.prop(part, "lines")
+        sub.prop(part, "shapes")
+        if part.role != "OUTLINE":
+            sub.prop(part, "pattern")
+        if part.role == "PATTERN":
+            sub.row().prop(part, "pick", expand=True)
+            if part.pick == "EYEDROPPER":
+                picks = sub.column(align=True)
+                for i, item in enumerate(part.picks):
+                    row = picks.row(align=True)
+                    row.prop(item, "use", text="")
+                    row.prop(item, "color", text="")
+                    op = row.operator("pointille.pick_remove", text="", icon="X")
+                    op.object_name, op.index = obj.name, i
+                picks.operator("pointille.pick_add", icon="EYEDROPPER").object_name = obj.name
+                sub.prop(part, "tolerance", slider=True)
+            else:
+                row = sub.row(align=True)
+                row.prop(part, "group_count")
+                row.operator("pointille.find_colors", icon="COLOR").object_name = obj.name
+                if part.pick == "GROUPS" and not len(part.groups):
+                    sub.label(text="Нажмите «Найти цвета» и отметьте нужные", icon="INFO")
+                groups = sub.column(align=True)
+                for item in part.groups:
+                    row = groups.row(align=True)
+                    if part.pick == "GROUPS":
+                        row.prop(item, "use", text="")
+                    row.prop(item, "color", text="")
+                    row.label(text=f"{item.share:.0f} %")
+                if part.pick == "AUTO":
+                    sub.label(text="Заполняются цвета, отличные от основного", icon="INFO")
+        col = box.column(align=True)
+        col.use_property_split = True
+        col.prop(s, "relief_angle")
+        col.prop(s, "crease_angle")
+        col.prop(s, "color_contrast", slider=True)
+        if s.area_mode != "FACADE":
+            col.prop(s, "view")
 
 
 class POINTILLE_PT_result(bpy.types.Panel):
@@ -87,6 +176,22 @@ class POINTILLE_PT_result(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text=f"Объект: {obj.name}", icon="OUTLINER_OB_POINTCLOUD")
         col.label(text=f"Вершин: {obj.get('pointille_count', 0)}")
+        if obj.get("pointille_budget"):
+            budget, count = obj["pointille_budget"], obj.get("pointille_count", 0)
+            rest = obj.get("pointille_leftover", 0)
+            if rest:
+                col.label(text=f"Лимит {budget}: фигура {count - rest}, остаток {rest} — "
+                          + obj.get("pointille_leftover_mode", ""), icon="CHECKMARK")
+            else:
+                col.label(text=f"Лимит {budget}: создано {count}, резерв {budget - count}", icon="CHECKMARK")
+            kinds = list(obj.get("pointille_kinds", (0, 0, 0)))
+            col.label(text=f"Углы {kinds[0]} · линии {kinds[1]} · заливка {kinds[2]}")
+            fill = obj.get("pointille_fill_spread", obj.get("pointille_spread", 1.0))
+            if fill > 1.0 + 1e-6:
+                lines = obj.get("pointille_spread", 1.0)
+                col.label(text=f"Фигуре нужно {obj.get('pointille_needed', 0)}: заливка ×{fill:.2f}"
+                          + (f", линии ×{lines:.2f}" if lines > 1.0 + 1e-6 else ""),
+                          icon="INFO")
         col.label(text=f"Мин. дистанция: {obj.get('pointille_min_distance', 0.0):.3f} м")
         col.label(text=f"Средняя дистанция: {obj.get('pointille_mean_distance', 0.0):.3f} м")
         if obj.get("pointille_outline_count"):

@@ -1,6 +1,6 @@
 import bpy
-from bpy.props import (BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, PointerProperty,
-                       StringProperty)
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty,
+                       PointerProperty, StringProperty)
 
 VIEW_ITEMS = [
     ("FRONT", "Спереди (−Y)", "Зрители смотрят вдоль +Y, как в виде Front"),
@@ -40,6 +40,26 @@ OUTLINE_LINE_ITEMS = [
     ("CREASES", "Рёбра", "Острые изломы поверхности: грани, углы, стыки частей"),
     ("BORDERS", "Края", "Края открытой поверхности: текст, логотипы, плоскости"),
     ("COLORS", "Цвета", "Границы цветов текстуры: глаза, рот, полосы, картинка на флаге"),
+]
+
+ROLE_ITEMS = [
+    ("FULL", "Контур + заливка", "Сначала углы и линии объекта, потом редкая заливка остальной поверхности"),
+    ("OUTLINE", "Только контур", "Только углы и линии, без заливки (например, скала под фигурой)"),
+    ("PATTERN", "Рисунок по цветам", "Линии и заливка только выбранных цветов (чёрные полосы тигра без "
+     "оранжевой шерсти)"),
+    ("FILL", "Только заливка", "Без линий: поверхность ровной сеткой или равномерно"),
+]
+PATTERN_ITEMS = [
+    ("HEX", "Треугольная сетка", "Ряды со сдвигом (соты): самое плотное и ровное заполнение при той же дистанции"),
+    ("SQUARE", "Квадратная сетка", "Ровные ряды и столбцы"),
+    ("NOISE", "Равномерно", "Без сетки: как прежде, равномерный шум"),
+    ("RINGS", "Кольца", "Кольцами вокруг вертикальной оси снизу вверх, по самой поверхности: шар, тыква, ваза "
+     "сразу читаются круглыми"),
+]
+PICK_ITEMS = [
+    ("GROUPS", "Группы цветов", "Плагин делит цвета модели на группы; отметьте, какие заполнять"),
+    ("EYEDROPPER", "Пипетка", "Заполняются цвета, похожие на выбранные пипеткой, в пределах допуска"),
+    ("AUTO", "Авто", "Заполняются все группы, заметно отличающиеся от основного цвета модели"),
 ]
 
 LED_STYLE_ITEMS = [
@@ -107,14 +127,93 @@ def _led_source_set(self, value):
     _skybrush().set_layer_source(value)
 
 
+class PointilleColor(bpy.types.PropertyGroup):
+    color: FloatVectorProperty(name="Цвет", subtype="COLOR", size=3, min=0.0, max=1.0, default=(0.0, 0.0, 0.0))
+    use: BoolProperty(name="Заполнять", description="Заливка встаёт на этот цвет", default=True)
+    share: FloatProperty(name="Доля", description="Какая часть поверхности этого цвета", subtype="PERCENTAGE")
+
+
+class PointillePart(bpy.types.PropertyGroup):
+    """How one of the selected objects takes its drones (layout with a budget)."""
+
+    role: EnumProperty(name="Режим", items=ROLE_ITEMS, default="FULL")
+    pattern: EnumProperty(name="Заливка", items=PATTERN_ITEMS, default="HEX")
+    shapes: BoolProperty(
+        name="Простые фигуры",
+        description="Черты объекта рисуются простыми фигурами, как у художника шоу: глаз — кольцом (с "
+        "зрачком, если есть место), почти круглая или овальная линия — ровным кругом или эллипсом, почти прямой "
+        "отрезок — прямым, а круглое тело (шар, тыква) заполняется кольцами снизу вверх",
+        default=True,
+    )
+    lines: EnumProperty(
+        name="Линии", description="Какие линии объекта обводить", items=OUTLINE_LINE_ITEMS, options={"ENUM_FLAG"},
+        default={"SILHOUETTE", "RELIEF", "CREASES", "BORDERS", "COLORS"},
+    )
+    pick: EnumProperty(name="Какие цвета", items=PICK_ITEMS, default="GROUPS")
+    group_count: IntProperty(name="Групп", description="На сколько групп делить цвета модели", default=4, min=2,
+                             max=8)
+    groups: CollectionProperty(type=PointilleColor)
+    picks: CollectionProperty(type=PointilleColor)
+    tolerance: FloatProperty(
+        name="Допуск", description="Насколько цвет может отличаться от выбранного пипеткой (100 % — как чёрный "
+        "и белый)", default=15.0, min=1.0, max=100.0, subtype="PERCENTAGE",
+    )
+
+
 class PointilleSettings(bpy.types.PropertyGroup):
-    count: IntProperty(name="Вершин", description="Сколько вершин распределить по поверхности", default=500, min=1, soft_max=10000)
+    count_mode: EnumProperty(
+        name="Количество",
+        items=[
+            ("LIMIT", "Не больше", "Сначала углы, потом линии, потом редкая заливка — сколько нужно фигуре, но не "
+             "больше лимита; остаток остаётся в резерве"),
+            ("EXACT", "Ровно", "Ровно столько вершин, равномерно по всей выделенной модели (как прежде)"),
+        ],
+        default="LIMIT",
+    )
+    leftover_mode: EnumProperty(
+        name="Остаток",
+        description="Что делать с дронами, которые фигуре не понадобились (лимит минус созданные). Skybrush "
+        "оставляет дрона без точки в формации там, где он был, и он светится",
+        items=[
+            ("NONE", "Не трогать", "Остаток остаётся в резерве: вершин меньше лимита"),
+            ("PARK", "Парковка", "Остаток — тёмные дроны (свет выключен) ровной сеткой под фигурой; если "
+             "фигура низко — за ней. Вершин ровно по лимиту"),
+            ("STARS", "Звёздочки", "Остаток — звёздочки из 5 дронов и искры вокруг фигуры, тёплый белый, как "
+             "в больших шоу; что не поместилось — на парковку. Вершин ровно по лимиту"),
+        ],
+        default="NONE",
+    )
+    count: IntProperty(name="Вершин", description="Сколько вершин распределить по поверхности; в режиме «Не "
+                       "больше» — сколько можно использовать самое большее", default=500, min=1, soft_max=10000)
+    line_ratio: FloatProperty(
+        name="Шаг линий", description="Во сколько раз вершины на линиях стоят дальше друг от друга, чем в углах "
+        "(там — мин. дистанция)", default=1.5, min=1.0, max=5.0,
+    )
+    curve_depth: EnumProperty(
+        name="Глубина кривых",
+        description="Как глубоко лежат кривые, построенные из модели: углубления (вырезанные глаза, рот) "
+        "всегда убраны, а глубина фигуры",
+        items=[
+            ("FLAT", "Плоско", "Все кривые в одной плоскости лицом к зрителям: рисунок читается с любого места"),
+            ("SHALLOW", "Неглубоко", "Четверть глубины фигуры: немного объёма, рисунок читается почти отовсюду"),
+            ("SHAPE", "По форме", "На сглаженной поверхности модели: объём как у модели"),
+            ("VOLUME", "Объём", "Вся модель, видна со всех сторон: горизонтальные срезы снизу доверху и прямо "
+             "на поверхности контур, глаза, рот и сильные линии с четырёх сторон"),
+        ],
+        default="SHALLOW",
+    )
+    fill_ratio: FloatProperty(
+        name="Шаг заливки", description="Во сколько раз вершины заливки стоят дальше друг от друга, чем в углах",
+        default=3.0, min=1.0, max=10.0,
+    )
     seed: IntProperty(name="Seed", description="Другое число — другая, но такая же ровная расстановка", default=0, min=0)
     area_mode: EnumProperty(
         name="Область",
         items=[
             ("SURFACE", "Вся поверхность", "Равномерно по всей модели"),
             ("FACADE", "Фасад", "Гуще там, где модель видят зрители; скрытые части — реже или без вершин"),
+            ("AROUND", "Вокруг (3D)", "Фигура видна со всех сторон: чёткий силуэт и детали линиями. Круглые "
+             "тела (фрукты, тыквы) — каркас из рёбер и колец, персонажи — контур, черты лица и корона"),
         ],
         default="SURFACE",
     )
@@ -202,7 +301,10 @@ class PointilleSettings(bpy.types.PropertyGroup):
         ],
         default="NONE",
     )
-    target_min_distance: FloatProperty(name="Мин. дистанция", default=1.5, min=0.01, unit="LENGTH")
+    target_min_distance: FloatProperty(
+        name="Мин. дистанция", description="Ближе этого вершины не встанут; в режиме «Не больше» так близко стоят "
+        "вершины в углах фигуры", default=1.5, min=0.01, unit="LENGTH",
+    )
     target_height: FloatProperty(name="Высота фигуры", default=20.0, min=0.01, unit="LENGTH")
     relax_iterations: IntProperty(
         name="Выравнивание", description="Итерации выравнивания (0 — выкл.)", default=20, min=0, max=200,
@@ -242,8 +344,12 @@ class PointilleSettings(bpy.types.PropertyGroup):
 
 
 def register():
+    bpy.utils.register_class(PointilleColor)
+    bpy.utils.register_class(PointillePart)
     bpy.utils.register_class(PointilleSettings)
     bpy.types.Scene.pointille = PointerProperty(type=PointilleSettings)
+    # per model object: its role in a layout with a budget
+    bpy.types.Object.pointille_part = PointerProperty(type=PointillePart)
     # per vertex object: what stands on its vertices
     bpy.types.Object.pointille_instance = PointerProperty(
         name="Объект на вершинах",
@@ -258,5 +364,8 @@ def register():
 
 def unregister():
     del bpy.types.Object.pointille_instance
+    del bpy.types.Object.pointille_part
     del bpy.types.Scene.pointille
     bpy.utils.unregister_class(PointilleSettings)
+    bpy.utils.unregister_class(PointillePart)
+    bpy.utils.unregister_class(PointilleColor)
