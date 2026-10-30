@@ -266,3 +266,24 @@ def test_hidden_surface_gets_a_sparse_fill():
     assert not (seen.positions[:, 1] > 2.0).any()
     assert back.sum() >= 3 and back.sum() < (~back).sum()  # ~9 at a quarter of the fill's density
     assert both.min_distance >= 1.5 - 1e-9
+
+
+def test_a_box_seen_from_all_round_is_drawn_by_its_edges():
+    from helpers import cube
+    from pointille.core.color import linear_to_srgb
+    r = compose([Part(MeshData(cube(44.58, 1).triangles))],
+                DistributeOptions(count=500, target_min_distance=1.5, min_brightness=0.4, view_dir=(0.0, -1.0, 0.0)))
+    a = np.sort(np.abs(r.positions / 22.29), axis=1)
+    edge = a[:, 1] > 0.98  # two coordinates on the box: on one of its edges
+    assert (r.kind[a[:, 0] > 0.98] == 0).sum() == 8  # a drone in every corner
+    assert edge[r.kind < 2].all() and edge.sum() >= 12 * 15  # every edge a line, from every side
+    for axis in range(3):  # all 12 edges, the back ones too
+        for s1 in (-1.0, 1.0):
+            for s2 in (-1.0, 1.0):
+                on = edge & (np.abs(a[:, 1] - 1.0) < 0.02)
+                p = r.positions / 22.29
+                on &= (np.abs(p[:, (axis + 1) % 3] - s1) < 0.02) & (np.abs(p[:, (axis + 2) % 3] - s2) < 0.02)
+                assert on.sum() >= 12
+    level = linear_to_srgb(r.colors_linear).max(axis=1)
+    assert np.median(level[r.kind == 2]) < np.median(level[r.kind < 2]) - 0.2  # the fill a background
+    assert r.min_distance >= 1.5 - 1e-6

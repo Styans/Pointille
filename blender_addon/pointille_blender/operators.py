@@ -170,6 +170,7 @@ def _options(context, s, count, seed, limit):
         color_contrast=s.color_contrast / 100.0,
         line_ratio=s.line_ratio,
         fill_ratio=s.fill_ratio,
+        around_parts=s.around_parts,
         scale_mode=scale,
         target_min_distance=s.target_min_distance,
         target_height=s.target_height,

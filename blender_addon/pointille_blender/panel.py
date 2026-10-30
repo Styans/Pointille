@@ -42,6 +42,7 @@ class POINTILLE_PT_main(bpy.types.Panel):
             col = layout.column(align=True)
             col.label(text="Силуэт и детали видны со всех сторон", icon="ORIENTATION_GIMBAL")
             col.label(text="Круглые тела — рёбра и кольца, персонажи — ряды, глаза, корона")
+            layout.prop(s, "around_parts")
             if not limit:
                 layout.prop(s, "leftover_mode")
         if s.area_mode == "FACADE":

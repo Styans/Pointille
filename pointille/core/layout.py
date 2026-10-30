@@ -83,6 +83,8 @@ VIEWS_360 = 4  # without facade mode, the lines are read from this many views ro
 REDETECT_360 = 1.6  # ... read again only when their spacing changes more than this factor (four views cost)
 FILL_FIRST = 2.0  # short of drones, the fill grows this much sparser before the lines do
 ROUND_MOSTLY = 0.7  # without facade mode, a part this much round bodies (by area) draws no relief lines
+CREASE_LONG = 3.0  # without facade mode, sharp edges of the mesh this many line spacings long are lines too
+FILL_GLOW = 0.45  # without facade mode, the fill glows this much of its colour: a background to the lines
 
 
 @dataclass
@@ -198,6 +200,7 @@ def compose(parts: List[Part], options: DistributeOptions = None) -> DroneResult
 
     found = {}  # the lines are read again only when their spacing changes much
     s1, sf1 = opt.line_ratio * d0, opt.fill_ratio * d0
+    creases = _creases(parts, opt, mesh, offsets, s1, rng)
     # a quick look from the middle viewer: the drones the figure needs, so a figure needing far more than
     # the budget is never laid out at the spacing asked for
     ext = np.sort(np.ptp(tris.reshape(-1, 3), axis=0))
@@ -250,6 +253,7 @@ def compose(parts: List[Part], options: DistributeOptions = None) -> DroneResult
             found["reading"] = _views_read(parts, opt, mesh, offsets, normals, s_line, bodies)
             found["at"] = fl
         lines, line_parts = _views_place(found["reading"], parts, s_line, near, s_fill)
+        lines, line_parts = _with_creases(creases, lines, line_parts, near, s_line, tris)
         fills = [_plan_fill(k, p, ln, lp, s_fill, opt, tris, normals, weights, offsets, audience, pos, tri, owner,
                             in_region, area, bodies.get(k))
                  if p.has_fill else None for k, (p, ln, lp) in enumerate(zip(parts, lines, line_parts))]
@@ -334,6 +338,9 @@ def compose(parts: List[Part], options: DistributeOptions = None) -> DroneResult
         on_line = kind < 2
         under = _color.surface_colors(mesh, p_tri[on_line], p_bary[on_line])
         colors[on_line] = np.where(np.isnan(marked[on_line]), under, marked[on_line])
+    fill = kind == 2
+    if fill.any() and (~fill).any():  # the lines draw the figure, the fill is a background to them
+        colors[fill] = _color.srgb_to_linear(_color.linear_to_srgb(colors[fill]) * FILL_GLOW)
     colors = _color.glow(colors, opt.min_brightness)
 
     dmin, dmean = spacing(points, d0 * f * opt.fill_ratio)
@@ -897,6 +904,55 @@ def _find(part: Part, opt, mesh: MeshData, offset: int, spacing: float, rng, aud
     if lines.surface is not None:
         lines.surface.parent = lines.surface.parent + offset
     return lines
+
+
+def _creases(parts, opt, mesh: MeshData, offsets, s: float, rng):
+    """The sharp edges of each part's mesh (its faces meet at more than ``crease_angle``) at least
+    ``CREASE_LONG`` line spacings ``s`` long, with the corners where they meet: the edges of a box are its
+    lines from every side, though every view but one sees them as its outline. None for a part without."""
+    out = []
+    for k, p in enumerate(parts):
+        lines = None
+        if p.has_lines and p.options.creases:
+            only = Part(p.mesh, replace(p.options, silhouette=False, relief=False, borders=False, colors=False))
+            lines = _find(only, opt, mesh, int(offsets[k]), s, rng, None)
+        if lines is not None:
+            lines.chains = [c for c in lines.chains if c.length >= CREASE_LONG * s]  # a nick is no edge
+            if lines.chains:
+                nodes = np.vstack([c.p for c in lines.chains])
+                on = _outline._near(lines.pos, nodes, 2.0 * lines.step)
+                lines.pos, lines.tri, lines.bary, lines.color = (x[on] for x in (lines.pos, lines.tri, lines.bary,
+                                                                                 lines.color))
+                node, c_pos, c_tri, c_bary = lines.corners
+                on = _outline._near(c_pos, nodes, 2.0 * lines.step)
+                lines.corners = (node[on], c_pos[on], c_tri[on], c_bary[on])
+                lines.strength = lines.strength[on]
+            else:
+                lines = None
+        out.append(lines)
+    return out
+
+
+def _with_creases(creases, lines, line_parts, near: float, s: float, tris):
+    """The lines read from the views with the sharp edges of the mesh (``_creases``) first: the line drones
+    of the views on a sharp edge give way to its own (their corners stay)."""
+    lines, line_parts = list(lines), list(line_parts)
+    for k, c in enumerate(creases):
+        if c is None:
+            continue
+        cpos, ctri, cbary, ckind, csigma = _place_lines(c, near, s, tris, None)
+        dense, colors = c.pos, np.full((len(cpos), 3), np.nan)
+        if line_parts[k] is not None:
+            pos, tri, bary, kind, sigma = line_parts[k]
+            off = (kind == 0) | ~_outline._near(pos, c.pos, _outline.LINE_GAP * s)
+            cpos, ctri, cbary = np.vstack([cpos, pos[off]]), np.r_[ctri, tri[off]], np.vstack([cbary, bary[off]])
+            ckind, csigma = np.r_[ckind, kind[off]], np.r_[csigma, sigma[off]]
+            dense = np.vstack([dense, lines[k].pos])
+            colors = np.vstack([colors, lines[k].colors_at(pos[off])])
+        order = np.argsort(ckind, kind="stable")  # the corners first
+        line_parts[k] = tuple(x[order] for x in (cpos, ctri, cbary, ckind, csigma))
+        lines[k] = _Drawn(dense, line_parts[k][0], colors[order])
+    return lines, line_parts
 
 
 def _place_lines(lines, near: float, s_line: float, tris, audience):

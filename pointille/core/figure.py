@@ -20,6 +20,7 @@ fewer pairs coincide in projection from 72 views, keeping mirror pairs mirrored.
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass
 
@@ -59,8 +60,16 @@ class Slicer:
         self.vid = vid.reshape(-1, 3)
         self.verts = corners[first]
         self.nv = int(vid.max()) + 1
-        self.z = tris[:, :, up]
-        zmin, zmax = self.z.min(axis=1), self.z.max(axis=1)
+        self._bucket(tris[:, :, up], np.arange(len(tris)))
+
+    def _bucket(self, values: np.ndarray, keep: np.ndarray):
+        self.z = values
+        if not len(keep):
+            self.zlo = self.zhi = 0.0
+            self.bin, self.nbins = 1.0, 1
+            self.cell_tri, self.cell_start = np.zeros(0, np.int64), np.zeros(2, np.int64)
+            return
+        zmin, zmax = values[keep].min(axis=1), values[keep].max(axis=1)
         self.zlo = float(zmin.min())
         self.zhi = float(zmax.max())
         # triangles bucketed by height: a cut only looks at the buckets it crosses
@@ -68,13 +77,21 @@ class Slicer:
         b0 = np.floor((zmin - self.zlo) / self.bin).astype(np.int64)
         b1 = np.floor((zmax - self.zlo) / self.bin).astype(np.int64)
         span = b1 - b0 + 1
-        owner = np.repeat(np.arange(len(tris)), span)
+        owner = np.repeat(keep, span)
         cell = np.repeat(b0, span) + (np.arange(span.sum()) - np.repeat(np.cumsum(span) - span, span))
         order = np.argsort(cell, kind="stable")
         self.cell_tri = owner[order]
         cells = cell[order]
         self.nbins = int(b1.max()) + 1
         self.cell_start = np.searchsorted(cells, np.arange(self.nbins + 1))
+
+    def recut(self, values: np.ndarray = None, mask: np.ndarray = None) -> "Slicer":
+        """The same mesh cut where ``values`` (T, 3), one per triangle corner, cross a level instead of the
+        height, only its triangles in ``mask``."""
+        out = copy.copy(self)
+        keep = np.arange(len(self.tris)) if mask is None else np.flatnonzero(mask)
+        out._bucket(self.z if values is None else values, keep)
+        return out
 
     def cut(self, z: float):
         k = int(np.clip(math.floor((z - self.zlo) / self.bin), 0, self.nbins - 1))
@@ -180,6 +197,7 @@ class Slicer:
 
 # ---------------------------------------------------------------------------------------------- rings
 
+from . import burst as _burst  # noqa: E402
 from . import color as _color  # noqa: E402
 from .api import DistributeOptions, DroneResult  # noqa: E402
 from .mesh import MeshData  # noqa: E402
@@ -189,6 +207,8 @@ from .spatial import Grid, nearest  # noqa: E402
 from .stats import spacing  # noqa: E402
 
 CFG = dict(K=16, stagger=False, fill=None, min_arc=1.15, deep=0.5, g0=1.0, step=0.2, tau=0.5, smooth=1.0, rows=0.5)
+# rows by the parts of the figure (``DistributeOptions.around_parts``, see ``PartRings``)
+PARTS = dict(k_up=8, k_side=4, half=True, outline_level=1.0, between_level=0.5)
 
 
 @dataclass
@@ -359,6 +379,108 @@ class Rings:
                 self.used.append(run)
         self.run_id, self.sample = np.concatenate(R), np.concatenate(S)
         self.level, self.angle = np.concatenate(Lv), np.concatenate(An)
+        return np.concatenate(P), np.concatenate(T), np.concatenate(Bc), np.concatenate(Kd)
+
+
+def _round_part(axis: np.ndarray, k: int) -> np.ndarray:
+    """Up to 4 directions round a sideways part: up and down across it, then its two sides."""
+    up = np.array([0.0, 0.0, 1.0]) - axis[2] * axis
+    if np.linalg.norm(up) < 1e-6:
+        up = np.array([1.0, 0.0, 0.0])
+    up /= np.linalg.norm(up)
+    side = np.cross(axis, up)
+    return np.array([up, -up, side, -side])[: max(k, 1)]
+
+
+def place_part(run: Run, sideways: bool, full: bool, a: float, min_arc: float):
+    """Indices into ``run`` of the drones of one row (an upright part) or ring (across a sideways part) and
+    their kinds: 1 where it meets its outline from fixed directions round the part (``PARTS["k_up"]`` round
+    the vertical, ``PARTS["k_side"]`` round a sideways part: the same on every row, so they stack into
+    columns that draw the silhouette from every side), 2 the drones between them ``a`` apart. A half row
+    (``full`` False) has only its outline drones."""
+    m = len(run.pos)
+    if run.length < min_arc or m < 3:
+        if not full:
+            return np.zeros(0, np.int64), np.zeros(0, np.int8)
+        return np.array([int(np.argmin(run.pos[:, 1]))]), np.array([1], np.int8)
+    c = run.pos.mean(axis=0)
+    if sideways:
+        q = run.pos - c
+        axis = np.linalg.eigh(q.T @ q)[1][:, 0]  # a ring round a part lies across it
+        dirs = _round_part(axis, PARTS["k_side"] if run.length / PARTS["k_side"] >= min_arc else 2)
+    else:
+        k = ring_k(run.length, PARTS["k_up"], None, min_arc) if run.closed else PARTS["k_up"]
+        d = directions(max(k, 2), True)
+        dirs = np.hstack([d, np.zeros((len(d), 1))])
+    hit = np.argmax((run.pos - c) @ dirs.T, axis=0)
+    if not run.closed:
+        hit = hit[(hit > 0) & (hit < m - 1)]  # an end cut off by the border of a part is no outline
+    out = sorted(set(hit.tolist()))
+    kinds = [1] * len(out)
+    if full:
+        arc, L = run.arc, run.length
+        if run.closed and out:
+            for i, j in zip(out, out[1:] + out[:1]):
+                gap = (arc[j] - arc[i]) % L if len(out) > 1 else L
+                n = int(math.ceil(gap / a - 1e-9)) - 1
+                for s in (arc[i] + gap * np.arange(1, n + 1) / (n + 1)) % L:
+                    out.append(int(np.argmin(np.abs(arc - s))))
+                    kinds.append(2)
+        else:
+            have = arc[out]
+            for s in np.linspace(0.0, L, max(int(round(L / a)), 1) + 1):
+                if not len(have) or np.abs(have - s).min() > 0.5 * a:
+                    out.append(int(np.argmin(np.abs(arc - s))))
+                    kinds.append(2)
+    return np.array(out, np.int64), np.array(kinds, np.int8)
+
+
+class PartRings(Rings):
+    """Rings by the parts of the figure (``burst.Parts``): horizontal rows on upright parts (``up``, a
+    ``Slicer`` of their triangles), rings across sideways ones (``side``, cut by the wave's arrival time),
+    each with its outline drones (``place_part``), and on the half levels between the rows those alone."""
+
+    def __init__(self, up: Slicer, side: Slicer, step: float):
+        super().__init__(up, step)
+        self.families = [(up, False), (side, True)]
+
+    def build(self, g: float, K: int, stagger: bool, amax, deep: float, min_arc: float, tau=None, smooth=0.0,
+              row=None):
+        a = 0.5 * g if row is None else row
+        P, T, Bc, Kd, R, S, Lv = [], [], [], [], [], [], []
+        self.used = []
+        for s, sideways in self.families:
+            if not len(s.cell_tri):
+                continue
+            h = s.zhi - s.zlo
+            n = max(int(math.floor((h - 0.3 * g) / g)) + 1, 1)
+            first = s.zlo + 0.5 * (h - (n - 1) * g)
+            levels = [(first + g * j, True) for j in range(n)]
+            if PARTS["half"]:
+                levels += [(first + g * (j + 0.5), False) for j in range(n - 1)]
+            for j, (z, full) in enumerate(levels):
+                for lp in s.cut(z):
+                    if lp.length <= 1e-3:
+                        continue
+                    run = resample(lp, self.step)
+                    idx, kind = place_part(run, sideways, full, a, min_arc)
+                    if not len(idx):
+                        continue
+                    P.append(run.pos[idx])
+                    T.append(run.tri[idx])
+                    Bc.append(run.bary[idx])
+                    Kd.append(kind)
+                    R.append(np.full(len(idx), len(self.used)))
+                    Lv.append(np.full(len(idx), j))
+                    S.append(idx)
+                    self.used.append(run)
+        if not P:
+            e = np.zeros(0, np.int64)
+            self.run_id, self.sample, self.level, self.angle = e, e, e, np.zeros(0)
+            return np.zeros((0, 3)), e, np.zeros((0, 3)), np.zeros(0, np.int8)
+        self.run_id, self.sample = np.concatenate(R), np.concatenate(S)
+        self.level = np.concatenate(Lv)
+        self.angle = np.full(len(self.level), np.nan)
         return np.concatenate(P), np.concatenate(T), np.concatenate(Bc), np.concatenate(Kd)
 
 
@@ -912,7 +1034,15 @@ def around(parts, options=None) -> DroneResult:
     areas, normals = triangle_areas_normals(tris)
     total = float(areas.sum())
     slicer = Slicer(tris, opt.up_axis)
-    rings = Rings(slicer, CFG["step"])
+    split = None
+    if opt.around_parts:  # the parts the wave from the core finds: rows on upright ones, rings across sideways
+        split = _burst.Parts(_burst.Body(tris, d0), d0)
+        t = split.body.at(slicer.verts)[slicer.vid]
+        side = (split.sideways_at(slicer.verts)[slicer.vid].sum(axis=1) >= 2) & np.isfinite(t).all(axis=1)
+        rings = PartRings(slicer.recut(mask=~side), slicer.recut(np.where(side[:, None], t, 0.0), side),
+                          CFG["step"])
+    else:
+        rings = Rings(slicer, CFG["step"])
     surf = Surface(mesh, tris, areas, normals, d0, rng)
     c = CFG
 
@@ -933,6 +1063,13 @@ def around(parts, options=None) -> DroneResult:
         extra.append((eyes, np.append(EYE_COLOR, 1.0)))
     if FEAT["tips"]:
         tp = find_tips(surf, slicer, d0)
+        if split is not None:  # the ends of parts in any direction (paws, a tail) as single drones
+            ends = split.tips(surf.p)
+            if len(ends) and len(tp[0]):
+                ends = ends[nearest(ends, tp[0], 2.0 * d0)[0] >= 2.0 * d0]  # an upward tip ball marks it
+            if len(ends):
+                _, et, eb = _snap(surf, ends)
+                tp = (np.vstack([tp[0], ends]), np.concatenate([tp[1], et]), np.vstack([tp[2], eb]))
         if len(tp[0]):
             _, si = nearest(tp[0], surf.p, 2.0 * surf.spacing)
             col = surf.lin[si] / np.maximum(surf.lin[si].max(axis=1, keepdims=True), 1e-6)
@@ -1034,8 +1171,11 @@ def around(parts, options=None) -> DroneResult:
     col = _color.glow(col, opt.min_brightness)
     s = _color.linear_to_srgb(col)
     s = s / np.maximum(s.max(axis=1, keepdims=True), 1e-6)  # full brightness of the hue ...
-    flev = np.concatenate([fl, np.full(len(rp), FEAT["ring_level"])])[order][keep]
-    level = np.where(feat, flev, FEAT["ring_level"])  # ... face and crown bright, outline less, creases dim
+    if split is not None:  # the outline columns of the parts bright, the drones between them dim
+        ring_level = np.where(rk == 2, PARTS["between_level"], PARTS["outline_level"])
+    else:
+        ring_level = np.full(len(rp), FEAT["ring_level"])
+    level = np.concatenate([fl, ring_level])[order][keep]  # ... face and crown bright, outline less, creases dim
     col = _color.srgb_to_linear(s * level[:, None])
     dmin, dmean = spacing(pos, g)
     return DroneResult(positions=pos, normals=nrm, triangle_ids=tri, barycentrics=bary, colors_linear=col,

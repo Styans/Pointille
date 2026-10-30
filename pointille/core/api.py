@@ -60,6 +60,10 @@ class DistributeOptions:
     # the lines are this many times and the fill this many times that far apart
     line_ratio: float = 1.5
     fill_ratio: float = 3.0
+    # ``around`` figures: a wave from the core through the inside tells the parts apart; upright parts keep
+    # horizontal rows, sideways ones (a tail, wings, a lying body) get rings across, bright columns on every
+    # row draw the outline from every side, the ends of parts are tips. False: horizontal rows everywhere
+    around_parts: bool = True
     # safety scaling: "none" | "min_distance" | "height"
     scale_mode: str = "none"
     target_min_distance: float = 1.5
